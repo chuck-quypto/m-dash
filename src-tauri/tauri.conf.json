@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "m-dash", "version": "0.5.0", "identifier": "net.chuckdudley.mdash",
+  "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://127.0.0.1:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
+  "app": {
+    "windows": [
+      { "title": "m-dash · AI resources", "width": 1180, "height": 860, "minWidth": 760, "minHeight": 600 },
+      { "label": "compact", "title": "m-dash · Allowances", "url": "index.html?compact", "width": 528, "height": 88, "visible": false, "focus": false, "decorations": false, "resizable": false, "minimizable": false, "maximizable": false, "alwaysOnTop": true, "skipTaskbar": true, "shadow": true, "backgroundColor": "#131820" }
+    ],
+    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'" }
+  },
+  "bundle": {
+    "active": true, "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../NOTICE": "NOTICE",
+      "../BRAND-LICENSE.txt": "BRAND-LICENSE.txt",
+      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
+      "../docs/USER_GUIDE.md": "USER_GUIDE.md",
+      "../docs/PRIVACY.md": "PRIVACY.md"
+    },
+    "windows": { "nsis": { "installMode": "currentUser" } }
+  }
+}

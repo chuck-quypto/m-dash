@@ -1,0 +1,45 @@
+[package]
+name = "m-dash"
+version = "0.5.0"
+edition = "2021"
+license = "Apache-2.0"
+default-run = "m-dash"
+
+[lib]
+name = "m_dash_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+m-dash-sync = { path = "../sync-core" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "sync"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+time = { version = "0.3", features = ["parsing", "formatting"] }
+uuid = { version = "1", features = ["v4"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+sha2 = "0.10"
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+base64 = "0.22"
+windows-sys = { version = "0.61", features = ["Win32_Security_Credentials", "Win32_Foundation", "Win32_Graphics_Gdi"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "=0.18.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSButton", "NSSecureTextField", "NSTextField", "NSControl", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry", "NSNotification", "NSOperation", "block2"] }
+
+[dev-dependencies]
+tempfile = "3"

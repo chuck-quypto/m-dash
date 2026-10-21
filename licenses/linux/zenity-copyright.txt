@@ -1,0 +1,127 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: https://download.gnome.org/sources/zenity
+Upstream-Name: zenity
+Comment: This package was debianized by Ross Burton <ross@debian.org> on
+ Sat,  1 Feb 2003 15:46:03 +0000.
+ .
+ COPYING and README.md indicate that the code is LGPL-2.1+ but
+ license headers on the code itself all say LGPL-2+
+ https://gitlab.gnome.org/GNOME/zenity/-/issues/110
+
+Files: *
+Copyright: Glynn Foster  <glynn.foster@sun.com>
+ 1998 James Henstridge
+ 1999, 2000 Red Hat Inc
+ 2001, 2002 Anders Carlsson
+ 2001 CodeFactory AB
+ 2002-2005 Sun Microsystems, Inc.
+ 2003-2025 Free Software Foundation Inc
+ 2003 Mike Newman
+ 2004, 2005, Adam Weinberger and the GNOME Foundation
+ 2004, Sharif FarsiWeb, Inc.
+ 2005-2009 Lucas Rocha
+ 2005, Canonical Ltd.
+ 2006 Christian Persch
+ 2007, 2011, 2012, Swecha Telugu Localisation Team <localization@swecha.net>.
+ 2010, Arx Cruz
+ 2010, Berislav Kovacki
+ 2010, Fran Diéguez
+ 2011, Iranian Free Software Users Group (IFSUG.org)translation team.
+ 2015, GNOME i18n Project for Vietnamese.
+ 2021-2023 Logan Rathbone
+ 2022, 2025 Alexander Shopov <ash@kambanaria.org>
+ 2025, Yaron Shahrabani
+ Croatiann team
+ the author(s) of zenity
+ The GNOME Foundation
+ The GNOME Project
+ THE PACKAGE'S COPYRIGHT HOLDER
+ the zenity authors
+ the zenity copyright holders
+ zenity
+ Zenity authors
+ zenity COPYRIGHT HOLDER
+License: LGPL-2+
+
+Files: debian/*
+Copyright: 2003 Ross Burton
+License: LGPL-2+
+
+Files: help/*
+Copyright: 2001, 2005-2020, 2023, 2025, Free Software Foundation, Inc.
+ 2008 Tommi Vainikainen
+ the author(s) of zenity
+ zenity's COPYRIGHT HOLDER
+ the zenity authors
+License: GFDL-NIV-1.1+
+
+License: GFDL-NIV-1.1+
+ Permission is granted to copy, distribute and/or modify this
+ document under the terms of the GNU Free Documentation License
+ (GFDL), Version 1.1 or any later version published by the Free
+ Software Foundation with no Invariant Sections, no Front-Cover
+ Texts, and no Back-Cover Texts.  You can find a copy of the GFDL
+ at this link: <ghelp:fdl> or in the file
+ COPYING-DOCS distributed with this manual.
+ .
+ This manual is part of a collection of GNOME manuals distributed
+ under the GFDL.  If you want to distribute this manual separately
+ from the collection, you can do so by adding a copy of the license
+ to the manual, as described in section 6 of the license.
+ .
+ Many of the names used by companies to distinguish their products and
+ services are claimed as trademarks. Where those names appear in any
+ GNOME documentation, and the members of the GNOME Documentation Project
+ are made aware of those trademarks, then the names are in capital letters
+ or initial capital letters.
+ .
+ DOCUMENT AND MODIFIED VERSIONS OF THE DOCUMENT ARE PROVIDED UNDER
+ THE TERMS OF THE GNU FREE DOCUMENTATION LICENSE WITH THE FURTHER
+ UNDERSTANDING THAT:
+ .
+ 1. DOCUMENT IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTY OF ANY
+    KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, WITHOUT LIMITATION,
+    WARRANTIES THAT THE DOCUMENT OR MODIFIED VERSION OF THE DOCUMENT
+    IS FREE OF DEFECTS MERCHANTABLE, FIT FOR A PARTICULAR PURPOSE OR
+    NON-INFRINGING. THE ENTIRE RISK AS TO THE QUALITY, ACCURACY, AND
+    PERFORMANCE OF THE DOCUMENT OR MODIFIED VERSION OF THE DOCUMENT
+    IS WITH YOU. SHOULD ANY DOCUMENT OR MODIFIED VERSION PROVE
+    DEFECTIVE IN ANY RESPECT, YOU (NOT THE INITIAL WRITER, AUTHOR
+    OR ANY CONTRIBUTOR) ASSUME THE COST OF ANY NECESSARY SERVICING,
+    REPAIR OR CORRECTION. THIS DISCLAIMER OF WARRANTY CONSTITUTES
+    AN ESSENTIAL PART OF THIS LICENSE. NO USE OF ANY DOCUMENT OR
+    MODIFIED VERSION OF THE DOCUMENT IS AUTHORIZED HEREUNDER EXCEPT
+    UNDER THIS DISCLAIMER; AND
+ .
+ 2. UNDER NO CIRCUMSTANCES AND UNDER NO LEGAL THEORY, WHETHER IN TORT
+    (INCLUDING NEGLIGENCE), CONTRACT, OR OTHERWISE, SHALL THE AUTHOR,
+    INITIAL WRITER, ANY CONTRIBUTOR, OR ANY DISTRIBUTOR OF THE DOCUMENT
+    OR MODIFIED VERSION OF THE DOCUMENT, OR ANY SUPPLIER OF ANY OF SUCH
+    PARTIES, BE LIABLE TO ANY PERSON FOR ANY DIRECT, INDIRECT, SPECIAL,
+    INCIDENTAL, OR CONSEQUENTIAL DAMAGES OF ANY CHARACTER INCLUDING,
+    WITHOUT LIMITATION, DAMAGES FOR LOSS OF GOODWILL, WORK STOPPAGE,
+    COMPUTER FAILURE OR MALFUNCTION, OR ANY AND ALL OTHER DAMAGES OR
+    LOSSES ARISING OUT OF OR RELATING TO USE OF THE DOCUMENT AND
+    COMPUTER FAILURE OR MALFUNCTION, OR ANY AND ALL OTHER DAMAGES OR
+    LOSSES ARISING OUT OF OR RELATING TO USE OF THE DOCUMENT AND
+    MODIFIED VERSIONS OF THE DOCUMENT, EVEN IF SUCH PARTY SHALL HAVE
+    BEEN INFORMED OF THE POSSIBILITY OF SUCH DAMAGES.
+Comment:
+ For simplicity we have chosen not to distribute our packaged version
+ of zenity under GFDL-NIV-1.1+, which can be obtained from
+ <https://www.gnu.org/licenses/old-licenses/fdl-1.1>,
+ but under GFDL-NIV-1.3+ instead, using the "or any later version" clause.
+ GFDL-1.1 might not be considered free according to Debian standards.
+ Here is a historical document about it:
+ https://people.debian.org/~srivasta/Position_Statement.xhtml
+ .
+ On Debian systems, the complete text of the GNU Free Documentation
+ License version 1.3 can be found in /usr/share/common-licenses/GFDL-1.3.
+
+License: LGPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Library General Public License as published by the
+ Free Software Foundation; version 2 of the License, or (at
+ your option) any later version.
+ On Debian systems, the complete text of version 2 of the GNU Library
+ General Public License can be found in '/usr/share/common-licenses/LGPL-2'.

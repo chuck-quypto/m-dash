@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="440" viewBox="0 0 660 440">
+<rect width="660" height="440" fill="#0A0C10"/>
+<path d="M36 112 H624" stroke="#2E3846"/>
+<text x="36" y="62" font-family="CND Hybrid Display,sans-serif" font-size="38" fill="#EEF2F6">m-dash</text>
+<text x="36" y="83" font-family="Geist,sans-serif" font-size="15" fill="#AEB8C6">AI resource monitor</text>
+<defs><filter id="dark-mark" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="table" tableValues="1 0"/><feFuncG type="table" tableValues="1 0"/><feFuncB type="table" tableValues="1 0"/></feComponentTransfer><feColorMatrix type="hueRotate" values="180"/></filter></defs>
+<image href="../src/brand/cnd-monogram-hybrid-transparent.png" x="504" y="14" width="120" height="90" filter="url(#dark-mark)"/>
+<rect x="114" y="265" width="132" height="28" rx="6" fill="#EEF2F6"/>
+<rect x="414" y="265" width="132" height="28" rx="6" fill="#EEF2F6"/>
+<path d="M290 210 H370 M358 198 L370 210 L358 222" fill="none" stroke="#22D3EE" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="330" y="340" text-anchor="middle" font-family="Geist,sans-serif" font-size="18" fill="#EEF2F6">Drag m-dash into Applications</text>
+<text x="330" y="370" text-anchor="middle" font-family="Geist,sans-serif" font-size="13" fill="#AEB8C6">Then launch it from Applications.</text>
+<text x="330" y="412" text-anchor="middle" font-family="Geist,sans-serif" font-size="12" fill="#AEB8C6">Apple Silicon · Free to use</text>
+</svg>

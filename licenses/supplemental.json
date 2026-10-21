@@ -1,0 +1,11 @@
+[
+  { "file": "alloc-stdlib-LICENSE.txt", "packages": ["alloc-stdlib@0.3.0"], "source": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE" },
+  { "file": "defmt-parser-LICENSE-MIT.txt", "packages": ["defmt-parser@1.0.0"], "source": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT" },
+  { "file": "MPL-2.0.txt", "packages": ["selectors@0.38.0"], "source": "https://www.mozilla.org/media/MPL/2.0/index.815ca599c9df.txt" },
+  { "file": "webview2-rs-LICENSE.txt", "packages": ["webview2-com@0.39.1", "webview2-com-sys@0.39.1", "webview2-com-macros@0.8.1"], "source": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE" },
+  { "name": "NSIS installer and compression modules", "file": "NSIS-COPYING.txt", "source": "https://nsis.sourceforge.io/Docs/AppendixI.html" },
+  { "name": "NSISdl download plugin", "file": "NSISdl-LICENSE.txt", "source": "https://nsis.sourceforge.io/Docs/NSISdl/ReadMe.txt" },
+  { "name": "Tauri NSIS utilities 0.5.3", "file": "nsis-tauri-utils-LICENSE-MIT.txt", "source": "https://raw.githubusercontent.com/tauri-apps/nsis-tauri-utils/nsis_tauri_utils-v0.5.3/LICENSE_MIT" },
+  { "name": "Rust standard library 1.98.0", "file": "Rust-standard-library-COPYRIGHT.txt", "source": "https://github.com/rust-lang/rust/tree/1.98.0/library" },
+  { "name": "Microsoft WebView2 SDK 1.0.3800.47 loader", "file": "WebView2-SDK-LICENSE.txt", "source": "https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3800.47" }
+]

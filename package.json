@@ -1,0 +1,26 @@
+{
+  "name": "m-dash",
+  "version": "0.5.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
+    "tauri": "tauri",
+    "mobile:dev": "vite mobile --host 127.0.0.1 --port 1422 --strictPort",
+    "mobile:build": "tsc -p mobile/tsconfig.json && vite build mobile",
+    "mobile:test": "node --test mobile/tests/*.test.mjs",
+    "android": "node scripts/android.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.3"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.2",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  }
+}

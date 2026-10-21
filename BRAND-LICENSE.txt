@@ -1,0 +1,25 @@
+CND brand assets — permission for m-dash
+Copyright (c) 2026 Chuck Dudley
+
+This permission covers the CND logo and monogram artwork, CND Hybrid Display font,
+and derived branded icons/header artwork included in this repository. It does not
+cover companion fonts or third-party assets with their own license notices.
+
+Permission is granted without a license fee to use, copy and redistribute these
+assets, in source or binary form, as part of m-dash or a modified version of m-dash,
+including commercial distributions. You may resize, recolor,
+convert formats, embed, or adjust layout as needed for that application and its
+documentation. Preserve this notice in source and binary distributions.
+
+This permission does not authorize use of these assets as the branding of an
+unrelated product, standalone font/artwork redistribution, or a claim of endorsement
+by CND or Chuck Dudley. Trademark rights are reserved except for identifying the
+origin of m-dash and describing its use of these assets. Modified applications must
+not misrepresent themselves as an official CND release.
+
+The assets are supplied AS IS, without warranty of any kind. To the extent
+permitted by law, the rights holder is not liable for claims or damages arising
+from their use. Rights granted by law or other applicable licenses are unaffected.
+
+All application code and documentation outside these brand assets are covered by
+the root Apache License 2.0, unless separately identified as third-party material.

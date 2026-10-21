@@ -1,0 +1,22 @@
+# Cargo and npm updates change the generated license notices, so only security
+# updates are opened for them (open-pull-requests-limit: 0 disables version bumps).
+# Regenerate notices on the affected Dependabot branch before merging.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: cargo
+    directories: [/src-tauri, /sync-core, /mobile/src-tauri]
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+  - package-ecosystem: npm
+    directories: [/, /relay]
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0

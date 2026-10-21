@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name={{name}}
+Comment=Local AI allowance and usage dashboard
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Type=Application
+Categories=Utility;Monitor;
+StartupWMClass=M-dash

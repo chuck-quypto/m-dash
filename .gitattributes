@@ -1,0 +1,6 @@
+# Windows notice fingerprints use canonical text bytes on every host.
+licenses/*.txt text eol=lf
+src/brand/fonts/*-LICENSE.txt text eol=lf
+/THIRD-PARTY-NOTICES.txt text eol=lf
+/src-tauri/Cargo.lock text eol=lf
+licenses/linux/*.txt text eol=lf

@@ -1,0 +1,12 @@
+{
+  "name": "m-dash-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "node ../node_modules/@tauri-apps/cli/tauri.js",
+    "mobile:build": "npm --prefix .. run mobile:build",
+    "mobile:dev": "npm --prefix .. run mobile:dev"
+  }
+}

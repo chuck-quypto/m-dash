@@ -1,0 +1,283 @@
+name: Release
+run-name: Release · ${{ inputs.reviewed_sha }}
+
+# Builds Windows and signed, notarized macOS installers for one reviewed commit on
+# main, attests them, and opens a draft GitHub Release. Publishing the draft is a
+# separate manual step.
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Full SHA of the reviewed release commit on main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      REQUESTED_SHA: ${{ inputs.reviewed_sha }}
+      ATTEST_PUBLIC: 'true'
+      REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+      PUBLIC_ATTESTATIONS_ENABLED: ${{ vars.PUBLIC_ATTESTATIONS_ENABLED }}
+      CARGO_INCREMENTAL: '0'
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Preserve canonical source and notice bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - name: Check the reviewed commit, versions and release notes
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          node scripts/windows-rc.mjs check
+          node scripts/release-notes.mjs (node -p "require('./package.json').version") > $null
+      - name: Install the qualified Rust toolchain
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default 1.98.0
+      - run: npm ci
+      - name: Run desktop checks
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          node --test scripts/windows-rc.test.mjs scripts/release-notes.test.mjs
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --lib -- --test-threads=1
+          cargo test --manifest-path sync-core/Cargo.toml --locked
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo fmt --manifest-path sync-core/Cargo.toml --check
+      - name: Regenerate and verify Windows notices
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo fetch --manifest-path src-tauri/Cargo.toml --locked
+          node scripts/generate-notices.mjs x86_64-pc-windows-msvc
+          node scripts/check-release-docs.mjs
+          git diff --exit-code -- THIRD-PARTY-NOTICES.txt licenses/inventory.json
+      - name: Build Windows x64 installer with locked dependencies
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --ci -- --locked
+      - name: Stage installer, notices, source archives and checksums
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $env:RC_RUST_VERSION = rustc --version
+          $env:RC_CARGO_VERSION = cargo --version
+          node scripts/windows-rc.mjs stage
+      - id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .local/windows-rc/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  mac:
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    # Apple signing secrets live only in this environment; require owner approval on it.
+    environment: release
+    env:
+      REQUESTED_SHA: ${{ inputs.reviewed_sha }}
+      ATTEST_PUBLIC: 'true'
+      REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+      PUBLIC_ATTESTATIONS_ENABLED: ${{ vars.PUBLIC_ATTESTATIONS_ENABLED }}
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: --remap-path-prefix=/Users/runner=/usr/src/build
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - name: Write the App Store Connect API key outside the checkout
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+      - name: Check the reviewed commit, versions and signing settings
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          test "$(uname -m)" = arm64
+          node scripts/mac-rc.mjs check
+          xcodebuild -version
+          xcrun --show-sdk-version
+      - name: Install the compiler matching the Mac notices
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default 1.94.1
+      - run: npm ci
+      - name: Run desktop checks
+        run: |
+          node --test scripts/windows-rc.test.mjs scripts/mac-rc.test.mjs scripts/release-notes.test.mjs
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --lib -- --test-threads=1
+          cargo test --manifest-path sync-core/Cargo.toml --locked
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo fmt --manifest-path sync-core/Cargo.toml --check
+      - name: Regenerate and verify Mac notices
+        run: |
+          cargo fetch --manifest-path src-tauri/Cargo.toml --locked
+          node scripts/generate-notices.mjs aarch64-apple-darwin
+          git diff --exit-code -- licenses/macos
+          node scripts/check-release-docs.mjs
+      - name: Build, sign and notarize the Apple Silicon app and DMG
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: npm run tauri -- build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles app,dmg --ci -- --locked
+      - name: Notarize and staple the DMG itself
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          dmg="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/m-dash_$(node -p "require('./package.json').version")_aarch64.dmg"
+          xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --timeout 30m
+          xcrun stapler staple "$dmg"
+      - name: Remove the API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+      - name: Verify Gatekeeper acceptance and stage the DMG, notices and source archives
+        run: |
+          export RC_RUST_VERSION="$(rustc --version)"
+          export RC_CARGO_VERSION="$(cargo --version)"
+          export RC_MACOS_SDK="$(xcrun --show-sdk-version)"
+          export RC_XCODE_VERSION="$(xcodebuild -version)"
+          node scripts/mac-rc.mjs stage
+          cd .local/mac-rc
+          shasum -a 256 --check SHA256SUMS
+      - id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-mac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .local/mac-rc/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    needs: [windows, mac]
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job that can request an OIDC signing identity.
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.assemble.outputs.version }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.windows.outputs.artifact-id }}
+          path: windows
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.mac.outputs.artifact-id }}
+          path: mac
+          merge-multiple: true
+      - name: Verify both platforms and assemble the release files
+        id: assemble
+        run: |
+          (cd windows && sha256sum --check --strict SHA256SUMS)
+          (cd mac && sha256sum --check --strict SHA256SUMS)
+          version="$(jq -r .version windows/BUILDINFO.json)"
+          test "$version" = "$(jq -r .version mac/BUILDINFO.json)"
+          test "$(jq -r .commit windows/BUILDINFO.json)" = "$GITHUB_SHA"
+          test "$(jq -r .commit mac/BUILDINFO.json)" = "$GITHUB_SHA"
+          mkdir release
+          mv "windows/m-dash_${version}_x64-setup.exe" "mac/m-dash_${version}_aarch64.dmg" release/
+          (cd windows && zip -X -q -r "../release/m-dash_${version}_windows-x64-release-materials.zip" .)
+          (cd mac && zip -X -q -r "../release/m-dash_${version}_macos-aarch64-release-materials.zip" .)
+          (cd release && sha256sum -- * > SHA256SUMS)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Create Sigstore-backed GitHub build provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/*
+          push-to-registry: false
+      - name: Add the verification bundle
+        run: cp "${{ steps.attest.outputs.bundle-path }}" "release/m-dash_${{ steps.assemble.outputs.version }}.sigstore.jsonl"
+      - id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    needs: attest
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The only job that can write to the repository; it creates a draft, never a published release.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.attest.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.attest.outputs.artifact-id }}
+          path: release
+          merge-multiple: true
+      - name: Open the draft release
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --silent 2>/dev/null; then
+            echo "::error::Tag v$VERSION already exists; never reuse a release version"
+            exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::A release for v$VERSION already exists"
+            exit 1
+          fi
+          node scripts/release-notes.mjs "$VERSION" > notes.md
+          prerelease=()
+          [[ "$VERSION" == *-rc.* ]] && prerelease=(--prerelease)
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft "${prerelease[@]}" --target "$GITHUB_SHA" --title "m-dash $VERSION" --notes-file notes.md release/*

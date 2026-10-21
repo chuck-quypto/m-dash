@@ -1,0 +1,31 @@
+@import "./brand/cnd.css";
+@import "./brand/fonts-product-local.css";
+@import "./brand/fonts-hybrid-local.css";
+
+:root { font-family: var(--cnd-font-body); color: var(--cnd-fg); background: var(--cnd-surface); color-scheme: dark; font-synthesis: none; }
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+.strip { width: 100%; height: 100%; padding: 8px 10px; border: 1px solid var(--cnd-line-input); border-radius: 8px; user-select: none; }
+header { display: flex; gap: 4px; align-items: center; height: 22px; margin-bottom: 2px; color: var(--cnd-fg-muted); font-size: 12px; line-height: 16px; }
+.drag { cursor: move; width: 10px; color: var(--cnd-fg-muted); }
+button { font: inherit; line-height: 16px; padding: 0; border: none; background: none; color: var(--cnd-fg); cursor: pointer; }
+button:hover { color: var(--cnd-accent); }
+button:focus-visible { outline: 2px solid var(--cnd-accent); outline-offset: 2px; }
+#open { font-family: 'CND Hybrid Display', var(--cnd-font-display); font-size: 18px; font-weight: 400; line-height: 1.3; letter-spacing: 0; }
+.timezone { margin-left: auto; }
+.portfolio-mark { display: block; flex: none; width: 32px; height: 24px; object-fit: contain; filter: invert(1) hue-rotate(180deg); }
+.allowances { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.allowance { min-width: 0; display: grid; gap: 4px; }
+.label { display: flex; justify-content: space-between; gap: 3px; align-items: center; white-space: nowrap; font-size: 12px; line-height: 14px; }
+.period { color: var(--cnd-fg-muted); font-size: 12px; }
+.percent { font-weight: 500; font-variant-numeric: tabular-nums; }
+.meter { height: 5px; background: var(--cnd-line-strong); border-radius: 2px; overflow: hidden; }
+.meter > span { display: block; height: 100%; background: var(--cnd-accent); border-radius: 2px; }
+.low .meter > span { background: var(--cnd-warning); }
+.restricted .meter > span { background: var(--cnd-danger); }
+.stale .meter > span, .resetPending .meter > span { background: var(--cnd-fg-muted); }
+.unavailable .meter { background: repeating-linear-gradient(90deg, var(--cnd-fg-subtle) 0 4px, transparent 4px 7px); }
+.reset { color: var(--cnd-fg-muted); font-size: 12px; line-height: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.empty { font-size: 12px; color: var(--cnd-fg-muted); margin: 8px 0 0; }
+
+.percent, .reset { font-family: var(--cnd-font-mono); }

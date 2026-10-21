@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -14 280 214" width="280" height="214" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="10" role="img" aria-label="CND">
+  <title>CND</title>
+  <!-- D: horizon line that turns up into the bowl -->
+  <path d="M16 150 H185 C245 150 262 110 255 85 C246 50 200 30 130 30" stroke="#EEF2F6"/>
+  <!-- C: near-flat top meeting the N's peak, full bowl flowing into the horizon -->
+  <path d="M136 47 C129 44.5 117 44 104 45 C66 48 40 72 40 104 C40 136 72 150 120 150" stroke="#EEF2F6"/>
+  <!-- N: angled center stroke, mirrored bow on the right stroke, overshoot above the D -->
+  <path d="M138 44 L148 150 Q172.5 72.3 225 10" stroke="#EEF2F6"/>
+  <!-- The beam: N's first stroke, bowed, crossing the C and dropping below the horizon -->
+  <path d="M72 182 Q119.4 119.9 138 44" stroke="#22D3EE"/>
+</svg>

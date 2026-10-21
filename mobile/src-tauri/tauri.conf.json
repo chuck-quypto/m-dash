@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "m-dash companion",
+  "version": "0.1.0",
+  "identifier": "net.chuckdudley.mdash.mobile",
+  "build": {
+    "beforeDevCommand": "npm run mobile:dev",
+    "devUrl": "http://127.0.0.1:1422",
+    "beforeBuildCommand": "npm run mobile:build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "m-dash companion"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "../../src-tauri/icons/128x128.png",
+      "../../src-tauri/icons/icon.ico"
+    ],
+    "android": {
+      "minSdkVersion": 26
+    }
+  }
+}

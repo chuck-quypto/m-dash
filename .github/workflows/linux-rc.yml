@@ -1,0 +1,75 @@
+name: Linux release candidate
+run-name: Linux RC · ${{ inputs.reviewed_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Full reviewed source SHA; requires separate owner authorization for a Linux RC
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Preparation only. Never dispatch until separately authorized by the owner.
+    if: ${{ vars.LINUX_RC_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      LINUX_RC_ENABLED: ${{ vars.LINUX_RC_ENABLED }}
+      REQUESTED_SHA: ${{ inputs.reviewed_sha }}
+      ATTEST_PUBLIC: 'false'
+      REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+      PUBLIC_ATTESTATIONS_ENABLED: ${{ vars.PUBLIC_ATTESTATIONS_ENABLED }}
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: --remap-path-prefix=/home/runner=/usr/src/build
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - name: Validate reviewed source and private Linux gates
+        run: node scripts/linux-rc.mjs check
+      - name: Install native build prerequisites and pinned compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libsecret-1-dev libdbus-1-dev zenity libglib2.0-bin xdg-utils
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default 1.94.0
+      - run: npm ci
+      - name: Validate locked source locally on the candidate runner
+        run: |
+          node --test scripts/windows-rc.test.mjs scripts/linux-rc.test.mjs
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --lib -- --test-threads=1
+          cargo test --manifest-path sync-core/Cargo.toml --locked
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo fmt --manifest-path sync-core/Cargo.toml --check
+      - name: Generate notices from actual Linux packaging-host components
+        run: |
+          cargo fetch --manifest-path src-tauri/Cargo.toml --locked
+          node --test scripts/linux-packaging.test.mjs
+          node scripts/check-release-docs.mjs
+      - name: Build locked x86_64 Debian package
+        run: npm run tauri -- build --config src-tauri/tauri.linux.conf.json --target x86_64-unknown-linux-gnu --bundles deb --ci -- --locked
+      - name: Stage private package, MPL source archives and checksums
+        run: |
+          export RC_RUST_VERSION="$(rustc --version)"
+          export RC_CARGO_VERSION="$(cargo --version)"
+          node scripts/linux-rc.mjs stage
+          cd .local/linux-rc
+          sha256sum --check --strict SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-rc-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: .local/linux-rc/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
