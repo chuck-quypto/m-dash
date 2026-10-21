@@ -6,7 +6,7 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-10-22
 
 First public release. Targets Windows x64 and Apple Silicon macOS.
 
