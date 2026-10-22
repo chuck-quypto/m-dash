@@ -168,7 +168,12 @@ jobs:
         run: |
           dmg="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/m-dash_$(node -p "require('./package.json').version")_aarch64.dmg"
           xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --timeout 30m
-          xcrun stapler staple "$dmg"
+          # stapler fetches the ticket from Apple's CloudKit, which sometimes drops the connection.
+          for attempt in 1 2 3 4; do
+            xcrun stapler staple "$dmg" && break
+            [ "$attempt" -lt 4 ] || exit 1
+            sleep $((attempt * 15))
+          done
       - name: Remove the API key
         if: always()
         run: rm -f "$RUNNER_TEMP/AuthKey.p8"
