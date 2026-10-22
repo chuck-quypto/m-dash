@@ -15,6 +15,9 @@ dashboard, or analytics.
 - Shows provider-reported capacity and clearly labels missing or stale readings.
 - Keeps local history and estimates exhaustion only with enough recent data.
 - Lets you choose providers and up to four compact allowance windows.
+- Optionally, when your Claude five-hour window has expired, sends a small `ping`
+  to start the next one. It is off by default and uses a little of your Claude
+  usage.
 - Keeps subscription sign-in in the provider's CLI. OpenRouter keys use Windows
   Credential Manager, macOS Keychain, or the Linux Secret Service.
 
