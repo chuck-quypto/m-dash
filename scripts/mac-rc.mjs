@@ -27,14 +27,26 @@ export function checkMacSigning(env) {
 }
 
 // Gatekeeper must accept the signed, notarized app, and the DMG must carry its own stapled ticket.
-export function verifyNotarized(app, dmg) {
-  const run = (command, args) => execFileSync(command, args, { stdio: 'pipe' });
+// stapler looks tickets up in Apple's CloudKit, which sometimes drops the connection, so it gets a few tries.
+export function verifyNotarized(app, dmg, { attempts = 4, pause = seconds => execFileSync('sleep', [String(seconds)]) } = {}) {
+  const run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: 'pipe' });
+  const validate = path => {
+    for (let attempt = 1; ; attempt++) {
+      try { return run('xcrun', ['stapler', 'validate', path]); }
+      catch (error) {
+        const output = `${error.stdout ?? ''}${error.stderr ?? ''}`.trim();
+        if (attempt >= attempts) throw new Error(`stapler validate failed for ${path}:\n${output}`);
+        console.warn(`stapler validate attempt ${attempt} failed; retrying.\n${output}`);
+        pause(attempt * 15);
+      }
+    }
+  };
   run('codesign', ['--verify', '--deep', '--strict', app]);
   run('spctl', ['--assess', '--type', 'execute', app]);
-  run('xcrun', ['stapler', 'validate', app]);
+  validate(app);
   run('codesign', ['--verify', dmg]);
   run('spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', dmg]);
-  run('xcrun', ['stapler', 'validate', dmg]);
+  validate(dmg);
 }
 
 export function stageMacCandidate(root, env, { verify = verifyNotarized } = {}) {
