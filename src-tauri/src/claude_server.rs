@@ -70,10 +70,7 @@ async fn ingest(
 mod tests {
     use super::*;
     use crate::store::Store;
-    use std::{
-        io::{Read, Write},
-        sync::Mutex,
-    };
+    use std::sync::Mutex;
 
     #[test]
     fn occupied_receiver_disables_managed_feed_and_recovery_rejects_old_token() {
@@ -151,33 +148,40 @@ mod tests {
                     .await
                     .unwrap()
             });
-            let call = move |path: &str, origin: bool, body: &str| {
-                let mut stream = std::net::TcpStream::connect(address).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let origin = if origin {
-                    "Origin: https://untrusted.example\r\n"
-                } else {
-                    ""
-                };
-                write!(stream,"POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n{origin}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
-                let mut response = String::new();
-                stream.read_to_string(&mut response).unwrap();
-                response
+            // Read HTTP status without waiting for a clean TCP close.
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let call = |path: &str, origin: bool, body: &str| {
+                let mut request = client
+                    .post(format!("http://{address}{path}"))
+                    .header("content-type", "application/json")
+                    .body(body.to_owned());
+                if origin {
+                    request = request.header("origin", "https://untrusted.example");
+                }
+                request.send()
             };
-            let replies = tauri::async_runtime::spawn_blocking(move || {
-                let denied = call("/claude/wrong/logs",false,"{}");
-                let browser = call("/claude/fixture-token/logs",true,"{}");
-                let logs = r#"{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"claude-code"}}]},"scopeLogs":[{"logRecords":[{"attributes":[{"key":"user.account_uuid","value":{"stringValue":"one"}},{"key":"organization.id","value":{"stringValue":"org"}},{"key":"session.id","value":{"stringValue":"session"}}]}]}]}]}"#;
-                let identified = call("/claude/fixture-token/logs",false,logs);
-                let status = call("/claude/fixture-token/statusline",false,r#"{"session_id":"session","cost":{"total_api_duration_ms":100},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":2000}}}"#);
-                (denied,browser,identified,status)
-            }).await.unwrap();
-            assert!(replies.0.starts_with("HTTP/1.1 404"));
-            assert!(replies.1.starts_with("HTTP/1.1 403"));
-            assert!(replies.2.starts_with("HTTP/1.1 200"));
-            assert!(replies.3.starts_with("HTTP/1.1 200"));
+            let denied = call("/claude/wrong/logs", false, "{}")
+                .await
+                .unwrap()
+                .status();
+            let browser = call("/claude/fixture-token/logs", true, "{}")
+                .await
+                .unwrap()
+                .status();
+            let logs = r#"{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"claude-code"}}]},"scopeLogs":[{"logRecords":[{"attributes":[{"key":"user.account_uuid","value":{"stringValue":"one"}},{"key":"organization.id","value":{"stringValue":"org"}},{"key":"session.id","value":{"stringValue":"session"}}]}]}]}]}"#;
+            let identified = call("/claude/fixture-token/logs", false, logs)
+                .await
+                .unwrap()
+                .status();
+            let status = call("/claude/fixture-token/statusline",false,r#"{"session_id":"session","cost":{"total_api_duration_ms":100},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":2000}}}"#).await.unwrap().status();
+            assert_eq!(denied, StatusCode::NOT_FOUND);
+            assert_eq!(browser, StatusCode::FORBIDDEN);
+            assert_eq!(identified, StatusCode::OK);
+            assert_eq!(status, StatusCode::OK);
             assert_eq!(
                 store.lock().unwrap().claude_snapshot().unwrap().unwrap()["windows"][0]
                     ["remainingPercent"],
