@@ -6,6 +6,8 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-26
+
 ### Added
 - Allowance bars now warn about pace, not only what is left. A bar turns amber
   when the window's average pace would use it up before the reset, and red when
@@ -51,5 +53,6 @@ First public release. Targets Windows x64 and Apple Silicon macOS.
 - Android, encrypted mobile sync and the relay are experimental and are not part
   of this release.
 
-[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/chuck-quypto/m-dash/releases/tag/v0.5.0
