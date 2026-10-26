@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme-header.png" alt="M-DASH — Know what's left. CND Hybrid identity." width="1000">
+  <img src="docs/assets/readme-header.png?v=1.001" alt="M-DASH — Know what's left. CND Hybrid identity." width="1000">
 </p>
 
 A local desktop dashboard for your AI accounts. See allowances, reset times,

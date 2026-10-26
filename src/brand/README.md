@@ -12,6 +12,9 @@ m-dash uses the dark/product/quiet palette. The experimental Hybrid identity add
 the unmodified `logo/cnd-monogram-hybrid-transparent.png` and
 `dist/hybrid/cnd-hybrid-display-v1.woff2` from the brand source revision of
 October 18, 2026.
+Hybrid was updated on October 25, 2026 to version 1.001 from `cnd-brand` commit
+`1f4470c`, correcting title spacing without changing the letter shapes. The
+README header is regenerated from the same bundled font used by the UI.
 The monogram uses the brand's documented `invert(1) hue-rotate(180deg)` dark
 treatment in the upper-right portfolio signature. Hybrid is reserved for the
 upper-left M- app icon, product name (including the compact strip), and main heading; body,
