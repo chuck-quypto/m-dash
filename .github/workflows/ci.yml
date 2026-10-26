@@ -44,7 +44,7 @@ jobs:
           npm test
       - name: Release script and documentation checks
         run: |
-          node --test scripts/windows-rc.test.mjs scripts/linux-rc.test.mjs scripts/mac-rc.test.mjs scripts/release-notes.test.mjs
+          node --test scripts/windows-rc.test.mjs scripts/linux-rc.test.mjs scripts/mac-rc.test.mjs scripts/release-notes.test.mjs scripts/install-ubuntu-deps.test.mjs
           node scripts/check-release-docs.mjs
 
   rust:
@@ -70,9 +70,7 @@ jobs:
           cache: npm
       - name: Install Linux build prerequisites
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libsecret-1-dev libdbus-1-dev
+        run: bash scripts/install-ubuntu-deps.sh libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libsecret-1-dev libdbus-1-dev
       - name: Install the Rust toolchain
         run: |
           rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy --no-self-update

@@ -39,8 +39,7 @@ jobs:
         run: node scripts/linux-rc.mjs check
       - name: Install native build prerequisites and pinned compiler
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libsecret-1-dev libdbus-1-dev zenity libglib2.0-bin xdg-utils
+          bash scripts/install-ubuntu-deps.sh libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libsecret-1-dev libdbus-1-dev zenity libglib2.0-bin xdg-utils
           rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy --no-self-update
           rustup default 1.94.0
       - run: npm ci
