@@ -3,6 +3,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
+import { alertMark, alertSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
 interface Allowance {
@@ -34,6 +35,7 @@ interface Forecast {
   provider: string; label: string; unit: string; observedAt: number;
   perHour: number | null; exhaustsAt: number | null; resetsAt: number | null;
   resetBeforeExhaustion: boolean; sampleCount: number; sampleMinutes: number; reason: string | null;
+  windowId: string | null; alert: Alert | null; alertReason: AlertReason | null; runsOutAt: number | null; surgeRatio: number | null;
 }
 type Provider = 'codex' | 'claude' | 'grok' | 'openrouter';
 type CompactWindow = 'codexFiveHour' | 'codexWeekly' | 'claudeFiveHour' | 'claudeWeekly' | 'grokAllowance';
@@ -91,6 +93,12 @@ function windowName(window: Allowance) {
   const duration = window.durationMins;
   return duration == null ? window.label : `${window.label} · ${duration % 1440 === 0 ? `${duration / 1440}-day` : `${number.format(duration / 60)}-hour`} allowance`;
 }
+// Marker after the value and a sentence under it; stale readings keep the plain look.
+function alertParts(provider: string, windowId: string | null, remaining: number | null, resetsAt: number | null, restricted: boolean, stale: boolean) {
+  const facts = stale ? null : windowAlert(provider, windowId, remaining, resetsAt, restricted, state.forecasts);
+  const sentence = facts ? alertSentence(facts, dateTime) : '';
+  return { alert: facts?.alert ?? null, mark: alertMark(facts?.alert ?? null), line: sentence ? `<p class="alert-line" role="status">${alertMark(facts!.alert)} ${escape(sentence)}</p>` : '' };
+}
 function openrouterCard() {
   const snapshot = state.openrouter;
   const stale = !state.openrouterConfigured || state.openrouterError != null || (snapshot && Date.now() / 1000 - snapshot.observedAt > 360);
@@ -105,7 +113,7 @@ function claudeCard() {
   const nativeUsage = snapshot?.source === 'Claude Code account usage';
   const stale = (nativeUsage ? state.claudeUsageError != null : !state.claudeEnabled || state.claudeError != null) || !snapshot?.quotaObservedAt || Date.now() / 1000 - snapshot.quotaObservedAt > 360;
   return `<article class="provider muted-card"><div class="provider-heading"><h3>Claude</h3><span>Account allowance + local tokens</span></div>
-    ${windows.length ? `<div class="grok-metrics">${windows.map(window => `<div><span class="resource-label">${escape(window.label)}</span><p class="unavailable">${metric(window.remainingPercent)}% left</p><p class="support">Resets ${dateTime(window.resetsAt)}</p></div>`).join('')}</div><p class="connection-state ${stale ? 'warning-text' : ''}">${stale ? 'Last known quota' : escape(snapshot?.source)} · ${snapshot?.quotaObservedAt ? age(snapshot.quotaObservedAt) : 'time unavailable'}</p>` : '<p class="unavailable">Quota unavailable</p>'}
+    ${windows.length ? `<div class="grok-metrics">${windows.map(window => { const alert = alertParts('Claude', window.id, window.remainingPercent, window.resetsAt, false, stale); return `<div><span class="resource-label">${escape(window.label)}</span><p class="unavailable">${metric(window.remainingPercent)}% left${alert.mark}</p><p class="support">Resets ${dateTime(window.resetsAt)}</p>${alert.line}</div>`; }).join('')}</div><p class="connection-state ${stale ? 'warning-text' : ''}">${stale ? 'Last known quota' : escape(snapshot?.source)} · ${snapshot?.quotaObservedAt ? age(snapshot.quotaObservedAt) : 'time unavailable'}</p>` : '<p class="unavailable">Quota unavailable</p>'}
     <p class="support">Shared Claude allowance, read through the signed-in Claude CLI every five minutes.</p>
     ${snapshot?.observedTokens != null ? `<p class="support"><strong>${metric(snapshot.observedTokens, true)}</strong> local tokens observed since ${dateTime(snapshot.observedSince)}.</p>` : ''}
     ${snapshot?.lastTokenAt != null ? `<p class="connection-state">Last token event · ${age(snapshot.lastTokenAt)}</p>` : ''}
@@ -117,8 +125,9 @@ function claudeCard() {
 function grokCard() {
   const snapshot = state.grok;
   const stale = snapshot && (state.grokError != null || Date.now() / 1000 - snapshot.observedAt > 360);
+  const grokAlert = alertParts('Grok', null, snapshot?.remainingPercent ?? null, snapshot?.periodEnd ? Date.parse(snapshot.periodEnd) / 1000 : null, false, !!stale);
   return `<article class="provider muted-card grok-card"><div class="provider-heading"><h3>Grok</h3><span>${escape(snapshot?.plan ?? 'CLI subscription')}</span></div>
-    ${snapshot ? `<div class="grok-metrics"><div><span class="resource-label">Included allowance</span><p class="unavailable">${snapshot.remainingPercent == null ? 'Unavailable' : `${metric(snapshot.remainingPercent)}% left`}</p></div><div><span class="resource-label">Prepaid balance</span><p class="unavailable">${snapshot.prepaidCents == null ? 'Unavailable' : usd.format(snapshot.prepaidCents / 100)}</p></div></div>
+    ${snapshot ? `<div class="grok-metrics"><div><span class="resource-label">Included allowance</span><p class="unavailable">${snapshot.remainingPercent == null ? 'Unavailable' : `${metric(snapshot.remainingPercent)}% left${grokAlert.mark}`}</p>${grokAlert.line}</div><div><span class="resource-label">Prepaid balance</span><p class="unavailable">${snapshot.prepaidCents == null ? 'Unavailable' : usd.format(snapshot.prepaidCents / 100)}</p></div></div>
     <p class="connection-state ${stale ? 'warning-text' : ''}">${stale ? 'Last known values' : 'Grok CLI billing'} · ${age(snapshot.observedAt)}</p>
     <p class="support">Usage period ends ${snapshot.periodEnd ? escape(new Date(snapshot.periodEnd).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })) : 'at an unspecified time'}.</p>
     <p class="support">${snapshot.remainingPercent == null ? 'The CLI did not supply an allowance percentage. ' : ''}Prepaid balance is separate from included usage. Token history and refill dates are not supplied.</p>` : '<p class="unavailable">Not connected</p><p class="support">Reads your Grok CLI sign-in and billing. Run grok login if sign-in is needed, then refresh.</p>'}
@@ -148,7 +157,7 @@ function overview() {
   return `${enabled.codex ? `<section class="provider primary-card" aria-labelledby="codex-heading">
     <div class="provider-heading"><div><div class="eyebrow">CONNECTED THROUGH CODEX CLI</div><h2 id="codex-heading">Codex <span>${escape(snapshot?.plan ?? '')}</span></h2></div><span class="badge ${stale ? 'warning' : ''}">${status}</span></div>
     ${snapshot ? `
-      <div class="resources">${snapshot.windows.length ? snapshot.windows.map(window => `<div class="allowance"><div class="resource-label">${escape(windowName(window))}</div><div class="resource-value">${metric(window.remainingPercent)}<span>% left</span></div><meter min="0" max="100" value="${window.remainingPercent}" aria-label="${escape(window.label)} remaining">${window.remainingPercent}%</meter><div class="support">${metric(window.usedPercent)}% used · resets ${dateTime(window.resetsAt)}</div>${window.blocked ? '<p class="warning-text">Provider reports a spending restriction</p>' : ''}</div>`).join('') : '<p class="empty">No allowance window was supplied.</p>'}
+      <div class="resources">${snapshot.windows.length ? snapshot.windows.map(window => { const alert = alertParts('Codex', window.id, window.remainingPercent, window.resetsAt, window.blocked === true || snapshot.ordinaryUsageAllowed === false, !!stale); return `<div class="allowance"><div class="resource-label">${escape(windowName(window))}</div><div class="resource-value">${metric(window.remainingPercent)}<span>% left</span>${alert.mark}</div><meter class="${alert.alert ? `alert-${alert.alert}` : ''}" min="0" max="100" value="${window.remainingPercent}" aria-label="${escape(window.label)} remaining">${window.remainingPercent}%</meter><div class="support">${metric(window.usedPercent)}% used · resets ${dateTime(window.resetsAt)}</div>${window.blocked ? '<p class="warning-text">Provider reports a spending restriction</p>' : ''}${alert.line}</div>`; }).join('') : '<p class="empty">No allowance window was supplied.</p>'}
       <div class="resource"><div class="resource-label">Available resets</div><div class="resource-value">${metric(snapshot.availableResets)}</div><div class="support">${snapshot.resetDetails.some(row => row.expiresAt != null) ? `Next expiry ${dateTime(Math.min(...snapshot.resetDetails.flatMap(row => row.expiresAt == null ? [] : [row.expiresAt])))}` : 'Expiry details not supplied'}</div></div>
       ${snapshot.credits.length ? snapshot.credits.map(credit => `<div class="resource"><div class="resource-label">${escape(credit.label)} credits</div><div class="resource-value credits-value">${credit.unlimited ? 'Unlimited' : credit.balance == null ? 'Unavailable' : metric(Number(credit.balance))}</div><div class="support">Provider credit units · refill date not supplied</div></div>`).join('') : '<div class="resource"><div class="resource-label">Credits</div><div class="resource-value credits-value">Unavailable</div><div class="support">No credit balance supplied</div></div>'}</div>
       <div class="provider-footer"><span class="${snapshot.ordinaryUsageAllowed === false ? 'warning-text' : ''}">${snapshot.ordinaryUsageAllowed === true ? 'Included usage is available' : snapshot.ordinaryUsageAllowed === false ? 'Included usage is currently restricted' : 'Usage permission not supplied'}</span><span>Observed ${age(snapshot.observedAt)}</span></div>

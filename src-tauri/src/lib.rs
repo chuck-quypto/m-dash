@@ -275,6 +275,9 @@ fn update_forecasts(inner: &mut Inner) {
                 if unavailable {
                     forecast["perHour"] = serde_json::Value::Null;
                     forecast["exhaustsAt"] = serde_json::Value::Null;
+                    forecast["alert"] = serde_json::Value::Null;
+                    forecast["alertReason"] = serde_json::Value::Null;
+                    forecast["runsOutAt"] = serde_json::Value::Null;
                     forecast["reason"] =
                         serde_json::json!("Reconnect or refresh this provider before estimating.");
                 }

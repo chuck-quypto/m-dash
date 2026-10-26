@@ -6,6 +6,20 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+### Added
+- Allowance bars now warn about pace, not only what is left. A bar turns amber
+  when the window's average pace would use it up before the reset, and red when
+  it would run out well before it. Under 20% and under 5% left still turn amber
+  and red.
+- A ⚡ marker on an otherwise healthy bar when recent use runs at least twice the
+  window's average and would empty it before the reset.
+- Every amber, red and ⚡ bar also shows a symbol (?, ! or ⚡) and says why in
+  words, so the warnings don't depend on telling colors apart. The dashboard's
+  Codex bars now use the same colors as the strip and tray.
+
+### Security
+- Patched GLib's iterator soundness issue (RUSTSEC-2024-0429) in the Linux build.
+
 ## [0.5.0] - 2026-10-22
 
 First public release. Targets Windows x64 and Apple Silicon macOS.
