@@ -27,7 +27,7 @@ jobs:
       - name: RustSec advisories for every Rust lockfile
         run: |
           cargo install cargo-audit --locked
-          for lock in src-tauri/Cargo.lock sync-core/Cargo.lock mobile/src-tauri/Cargo.lock; do
+          for lock in src-tauri/Cargo.lock sync-core/Cargo.lock mobile/src-tauri/Cargo.lock vendor/glib/Cargo.lock; do
             echo "::group::$lock"
             cargo audit --file "$lock"
             echo "::endgroup::"

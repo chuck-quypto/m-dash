@@ -1,0 +1,17 @@
+m-dash GLib security backport
+
+This is glib 0.18.5 from the original crates.io archive, SHA-256:
+233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5
+Upstream source: https://crates.io/api/v1/crates/glib/0.18.5/download
+Patched source: https://github.com/chuck-quypto/m-dash/tree/main/vendor/glib
+
+The only source change is the upstream VariantStrIter::impl_get fix:
+https://github.com/gtk-rs/gtk-rs-core/commit/b5a4071e439bef2b5eea76c3aa25e5ae84839e34
+It makes the output pointer mutable and passes &mut p to g_variant_get_child.
+This fixes RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g without changing the
+glib 0.18 API required by Tauri's GTK3 dependencies. The upstream MIT license
+and copyright notices are preserved.
+
+Both app manifests patch crates.io glib to this shared directory. Remove the
+patch once their GTK dependency chains support an officially patched release.
+The optimized upstream variant_iter tests run in Linux CI to guard the fix.

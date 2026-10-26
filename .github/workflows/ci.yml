@@ -95,6 +95,11 @@ jobs:
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --locked --lib -- --test-threads=1
           cargo test --manifest-path sync-core/Cargo.toml --locked
+      - name: Optimized GLib iterator regression
+        if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+        run: cargo test --manifest-path vendor/glib/Cargo.toml --locked --release --no-default-features --lib variant_iter
 
   dco:
     if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}

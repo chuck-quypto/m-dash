@@ -1,7 +1,7 @@
 {
   "target": "x86_64-unknown-linux-gnu",
   "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-  "cargoLockSha256": "27adf8ab2d96395f232abbb74279d2d665fce57642ad36735a0657ffd3ebf524",
+  "cargoLockSha256": "e24c029550444e880c72ec5f1b71ce109c0bdfaa2dc8fe7f1dc12d17b7ea54b4",
   "packages": [
     {
       "name": "adler2",
@@ -2146,6 +2146,10 @@
         {
           "file": "LICENSE",
           "sha256": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+        },
+        {
+          "file": "NOTICE.m-dash.txt",
+          "sha256": "c40fe10b18e2b0418ca054efb7f68f4af5f67add2265b15de3f135045334818f"
         }
       ]
     },

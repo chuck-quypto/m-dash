@@ -18,7 +18,7 @@ for (const file of ['licenses/inventory.json', 'licenses/macos/inventory.json', 
   assert.equal(json(file).packages.find(pkg => pkg.name === 'rustls').version, rustls, `${file} TLS notice version`);
   for (const pkg of json(file).packages) {
     for (const notice of pkg.notices) {
-      const input = [`licenses/${notice.file}`, `src/brand/fonts/${notice.file}`].find(path => existsSync(join(root, path)));
+      const input = [`licenses/${notice.file}`, `src/brand/fonts/${notice.file}`, ...(pkg.name === 'glib' ? [`vendor/glib/${notice.file}`] : [])].find(path => existsSync(join(root, path)));
       if (!input) continue;
       const canonical = read(input).replaceAll('\r\n', '\n');
       assert.equal(notice.sha256, createHash('sha256').update(canonical).digest('hex'), `${file}: canonical notice hash for ${input}`);
@@ -47,8 +47,9 @@ const walk = path => readdirSync(join(root, path), { withFileTypes: true }).flat
   return entry.isDirectory() ? walk(file) : [file];
 });
 const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0');
+// Vendored Rust READMEs use rustdoc links rather than project file paths.
 const docs = [...new Set([...tracked, ...walk('docs'), 'CONTRIBUTING.md', 'SECURITY.md'])]
-  .filter(file => file.endsWith('.md') && !file.startsWith('licenses/') && existsSync(join(root, file)));
+  .filter(file => file.endsWith('.md') && !file.startsWith('licenses/') && !file.startsWith('vendor/') && existsSync(join(root, file)));
 const failures = [];
 for (const file of docs) {
   const text = read(file);

@@ -4,3 +4,4 @@ src/brand/fonts/*-LICENSE.txt text eol=lf
 /THIRD-PARTY-NOTICES.txt text eol=lf
 /src-tauri/Cargo.lock text eol=lf
 licenses/linux/*.txt text eol=lf
+/vendor/glib/** text eol=lf

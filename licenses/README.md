@@ -36,6 +36,11 @@ archives and a source/hash manifest with release materials. Apache 2.0 does not
 replace upstream terms. The public application source is separate from this
 optional third-party source archive.
 
+The shared `vendor/glib` copy carries the upstream iterator security fix for the
+GTK3-compatible 0.18 API. Its `NOTICE.m-dash.txt` records the original archive,
+the exact upstream fix and the patched source location. Linux notices include
+that notice alongside the original MIT license and copyright.
+
 Supplemental notices cover texts omitted from crate archives and platform/build
 components. Keep upstream text/whitespace unchanged. Review inputs when toolchain
 or components change. Updating one platform inventory does not qualify the other.
