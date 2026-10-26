@@ -39,19 +39,25 @@ pub fn write(directory: &Path, contents: &str) -> Result<(), String> {
     file.write_all(contents.as_bytes()).map_err(|_| ERROR)?;
     file.sync_all().map_err(|_| ERROR)?;
     fs::rename(temporary, directory.join(NAME)).map_err(|_| ERROR)?;
-    fs::File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(|_| ERROR)?;
-    Ok(())
+    sync_directory(directory)
 }
 pub fn clear(directory: &Path) -> Result<(), String> {
     match fs::remove_file(directory.join(NAME)) {
-        Ok(()) => fs::File::open(directory)
-            .and_then(|file| file.sync_all())
-            .map_err(|_| ERROR.into()),
+        Ok(()) => sync_directory(directory),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(ERROR.into()),
     }
+}
+
+fn sync_directory(directory: &Path) -> Result<(), String> {
+    // Keep directory fsync on Unix; file contents are flushed on every platform.
+    #[cfg(unix)]
+    fs::File::open(directory)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| ERROR)?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -66,7 +72,25 @@ mod tests {
         assert!(write(directory.path(), r#"{"mode":"live"}"#).is_err());
         assert!(write(directory.path(), &"x".repeat(131073)).is_err());
         assert_eq!(read(directory.path()).unwrap().as_deref(), Some(sample));
+        let replacement = r#"{"mode":"sample","snapshot":{"version":2},"receivedAt":200}"#;
+        write(directory.path(), replacement).unwrap();
+        assert_eq!(
+            read(directory.path()).unwrap().as_deref(),
+            Some(replacement)
+        );
         clear(directory.path()).unwrap();
         assert_eq!(read(directory.path()).unwrap(), None);
+        clear(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn sample_store_reports_io_failures_without_removing_the_blocking_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocked = directory.path().join(NAME);
+        fs::create_dir(&blocked).unwrap();
+        assert!(write(directory.path(), r#"{"mode":"sample"}"#).is_err());
+        assert!(read(directory.path()).is_err());
+        assert!(clear(directory.path()).is_err());
+        assert!(blocked.is_dir());
     }
 }

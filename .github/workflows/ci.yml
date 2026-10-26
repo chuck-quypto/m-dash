@@ -95,6 +95,14 @@ jobs:
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --locked --lib -- --test-threads=1
           cargo test --manifest-path sync-core/Cargo.toml --locked
+      - name: Mobile backend checks
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+        run: |
+          npm run mobile:build
+          cargo fmt --manifest-path mobile/src-tauri/Cargo.toml --check
+          cargo clippy --manifest-path mobile/src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --manifest-path mobile/src-tauri/Cargo.toml --locked --lib -- --test-threads=1
       - name: Optimized GLib iterator regression
         if: runner.os == 'Linux'
         env:
