@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import './compact.css';
+import { alertMark, alertSentence, type Alert, type AlertReason } from './alerts';
 import portfolioMark from './brand/cnd-monogram-hybrid-transparent.png';
 
 interface Allowance {
@@ -11,6 +12,7 @@ interface Allowance {
   resetsAt: number | null;
   observedAt: number | null;
   status: 'fresh' | 'stale' | 'unavailable' | 'resetPending' | 'restricted';
+  alert: Alert | null; alertReason: AlertReason | null; runsOutAt: number | null; surgeRatio: number | null;
 }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -30,12 +32,14 @@ function render() {
   cells.style.gridTemplateColumns = `repeat(${Math.max(rows.length, 1)}, minmax(0, 1fr))`;
   cells.innerHTML = rows.map(row => {
     const saved = row.status === 'stale' || row.status === 'resetPending';
-    const marker = saved ? '*' : row.status === 'restricted' ? '!' : '';
+    const marker = saved ? '*' : '';
     const percent = row.remainingPercent == null ? '—' : `${number.format(row.remainingPercent)}%${marker}`;
     const reset = row.resetsAt == null ? 'Reset unknown' : `${date.format(row.resetsAt * 1000)} · ${clock.format(row.resetsAt * 1000)}`;
     const period = row.period === 'wk' ? 'weekly' : row.period === '5h' ? '5-hour' : row.period === 'mo' ? 'monthly' : 'allowance';
-    const detail = `${row.label} ${period}: ${row.remainingPercent == null ? 'unavailable' : `${number.format(row.remainingPercent)}% remaining`}. ${statusText[row.status]}. Reset: ${row.resetsAt == null ? 'not supplied' : new Date(row.resetsAt * 1000).toLocaleString()}. Observed: ${row.observedAt == null ? 'not supplied' : new Date(row.observedAt * 1000).toLocaleString()}.`;
-    return `<div class="allowance ${row.status} ${row.remainingPercent != null && row.remainingPercent < 20 ? 'low' : ''}" title="${escape(detail)}" aria-label="${escape(detail)}"><div class="label"><span>${escape(row.label)} <span class="period">${escape(row.period)}</span></span><span class="percent">${percent}</span></div><div class="meter" ${row.remainingPercent == null ? 'role="img" aria-label="Allowance unavailable"' : `role="meter" aria-label="${escape(row.label)} ${escape(row.period)} remaining" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${row.remainingPercent}" aria-valuetext="${escape(detail)}"`}><span style="width:${row.remainingPercent ?? 0}%"></span></div><div class="reset">${reset}</div></div>`;
+    const when = (seconds: number) => `${date.format(seconds * 1000)} ${clock.format(seconds * 1000)}`;
+    const alert = alertSentence(row, when);
+    const detail = `${row.label} ${period}: ${row.remainingPercent == null ? 'unavailable' : `${number.format(row.remainingPercent)}% remaining`}. ${statusText[row.status]}.${alert ? ` ${alert}` : ''} Reset: ${row.resetsAt == null ? 'not supplied' : new Date(row.resetsAt * 1000).toLocaleString()}. Observed: ${row.observedAt == null ? 'not supplied' : new Date(row.observedAt * 1000).toLocaleString()}.`;
+    return `<div class="allowance ${row.status} ${row.alert ?? ''}" title="${escape(detail)}" aria-label="${escape(detail)}"><div class="label"><span>${escape(row.label)} <span class="period">${escape(row.period)}</span></span><span class="percent">${alertMark(row.alert)}${percent}</span></div><div class="meter" ${row.remainingPercent == null ? 'role="img" aria-label="Allowance unavailable"' : `role="meter" aria-label="${escape(row.label)} ${escape(row.period)} remaining" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${row.remainingPercent}" aria-valuetext="${escape(detail)}"`}><span style="width:${row.remainingPercent ?? 0}%"></span></div><div class="reset">${reset}</div></div>`;
   }).join('') || '<p class="empty">Choose allowance windows in m-dash Settings.</p>';
   root.querySelector('#summary')!.textContent = rows.some(row => row.status === 'stale' || row.status === 'resetPending') ? '· % left (* saved)' : '· % left';
 }

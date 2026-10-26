@@ -18,11 +18,16 @@ button:focus-visible { outline: 2px solid var(--cnd-accent); outline-offset: 2px
 .allowance { min-width: 0; display: grid; gap: 4px; }
 .label { display: flex; justify-content: space-between; gap: 3px; align-items: center; white-space: nowrap; font-size: 12px; line-height: 14px; }
 .period { color: var(--cnd-fg-muted); font-size: 12px; }
-.percent { font-weight: 500; font-variant-numeric: tabular-nums; }
+.percent { display: inline-flex; align-items: center; gap: 3px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.alert-mark { display: inline-grid; place-items: center; width: 13px; height: 13px; border-radius: 3px; font: 700 10px/1 var(--cnd-font-display); color: var(--cnd-surface); }
+.alert-mark.warning { background: var(--cnd-warning); }
+.alert-mark.critical { background: var(--cnd-danger); }
+.alert-mark.surge { background: var(--cnd-accent); }
+.alert-mark svg { width: 9px; height: 9px; }
 .meter { height: 5px; background: var(--cnd-line-strong); border-radius: 2px; overflow: hidden; }
 .meter > span { display: block; height: 100%; background: var(--cnd-accent); border-radius: 2px; }
-.low .meter > span { background: var(--cnd-warning); }
-.restricted .meter > span { background: var(--cnd-danger); }
+.warning .meter > span { background: var(--cnd-warning); }
+.critical .meter > span { background: var(--cnd-danger); }
 .stale .meter > span, .resetPending .meter > span { background: var(--cnd-fg-muted); }
 .unavailable .meter { background: repeating-linear-gradient(90deg, var(--cnd-fg-subtle) 0 4px, transparent 4px 7px); }
 .reset { color: var(--cnd-fg-muted); font-size: 12px; line-height: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; }

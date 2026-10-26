@@ -45,6 +45,14 @@ h2 > span { color: var(--cnd-fg-muted); font-size: 14px; font-weight: 400; text-
 meter { appearance: none; width: 100%; height: 6px; display: block; margin: 12px 0; background: var(--cnd-line-strong); border: none; border-radius: 4px; }
 meter::-webkit-meter-bar { height: 6px; background: var(--cnd-line-strong); border: none; border-radius: 4px; }
 meter::-webkit-meter-optimum-value { background: var(--cnd-accent); border-radius: 4px; }
+meter.alert-warning::-webkit-meter-optimum-value { background: var(--cnd-warning); }
+meter.alert-critical::-webkit-meter-optimum-value { background: var(--cnd-danger); }
+.alert-mark { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 4px; margin-left: 8px; vertical-align: middle; font: 700 11px/1 var(--cnd-font-display); letter-spacing: 0; color: var(--cnd-surface); }
+.alert-mark.warning { background: var(--cnd-warning); }
+.alert-mark.critical { background: var(--cnd-danger); }
+.alert-mark.surge { background: var(--cnd-accent); }
+.alert-mark svg { width: 10px; height: 10px; }
+.alert-line { font-size: 12px; line-height: 1.5; color: var(--cnd-fg); margin: 6px 0 0; }
 .support { font-size: 12px; line-height: 1.65; color: var(--cnd-fg-muted); }
 .provider-footer { border-top: 1px solid var(--cnd-line-strong); padding: 12px 0; font-size: 12px; color: var(--cnd-fg-muted); display: flex; justify-content: space-between; gap: 14px; }
 .secondary-providers { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 15px; margin: 16px 0 22px; }

@@ -7,7 +7,7 @@ pub fn show_strip(visible: bool, minimized: bool) -> bool {
     (cfg!(target_os = "macos") || visible) && minimized
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Allowance {
     pub label: &'static str,
@@ -16,6 +16,14 @@ pub struct Allowance {
     pub resets_at: Option<u64>,
     pub observed_at: Option<u64>,
     pub status: &'static str,
+    /// "warning" (amber, may run out), "critical" (red) or "surge" (recent pace far above average).
+    pub alert: Option<&'static str>,
+    /// "low", "pace", "surge" or "restricted": why the alert applies.
+    pub alert_reason: Option<&'static str>,
+    pub runs_out_at: Option<u64>,
+    pub surge_ratio: Option<f64>,
+    #[serde(skip)]
+    window_id: Option<String>,
 }
 
 pub fn allowances(dashboard: &Dashboard, now: u64) -> Vec<Allowance> {
@@ -99,6 +107,7 @@ pub fn allowances(dashboard: &Dashboard, now: u64) -> Vec<Allowance> {
                     resets_at: grok_reset,
                     observed_at: grok["observedAt"].as_u64(),
                     status: "unavailable",
+                    ..Allowance::default()
                 },
                 dashboard.grok_error.is_some(),
                 false,
@@ -124,6 +133,7 @@ pub fn allowances(dashboard: &Dashboard, now: u64) -> Vec<Allowance> {
         if row.status == "fresh" && blocked {
             row.status = "restricted";
         }
+        assess(&mut row, &dashboard.forecasts);
         rows.push(row);
         if rows.len() == 4 {
             break;
@@ -174,41 +184,135 @@ fn row(
         } else {
             "unavailable"
         },
+        window_id: window["id"].as_str().map(String::from),
+        ..Allowance::default()
     }
 }
 
+// Takes the alert worked out with the forecasts (src-tauri/src/forecast.rs), falling back to the
+// remaining-percent rules when no forecast covers this window.
+fn assess(row: &mut Allowance, forecasts: &[Value]) {
+    if row.status == "restricted" {
+        row.alert = Some("critical");
+        row.alert_reason = Some("restricted");
+        return;
+    }
+    let Some(remaining) = row.remaining_percent.filter(|_| row.status == "fresh") else {
+        return;
+    };
+    let forecast = forecasts.iter().find(|forecast| {
+        forecast["provider"] == row.label
+            && forecast["unit"] == "percentage points"
+            && forecast["windowId"].as_str() == row.window_id.as_deref()
+    });
+    let (alert, reason) = match forecast {
+        Some(forecast) => (forecast["alert"].as_str(), forecast["alertReason"].as_str()),
+        None if remaining < 5. => (Some("critical"), Some("low")),
+        None if remaining < 20. => (Some("warning"), Some("low")),
+        None => (None, None),
+    };
+    row.alert = match alert {
+        Some("warning") => Some("warning"),
+        Some("critical") => Some("critical"),
+        Some("surge") => Some("surge"),
+        _ => None,
+    };
+    row.alert_reason = match reason.filter(|_| row.alert.is_some()) {
+        Some("low") => Some("low"),
+        Some("pace") => Some("pace"),
+        Some("surge") => Some("surge"),
+        _ => None,
+    };
+    if let Some(forecast) = forecast.filter(|_| row.alert.is_some()) {
+        row.runs_out_at = forecast["runsOutAt"].as_f64().map(|at| at as u64);
+        row.surge_ratio = forecast["surgeRatio"].as_f64();
+    }
+}
+
+const RED: [u8; 4] = [247, 132, 140, 255];
+const AMBER: [u8; 4] = [245, 181, 68, 255];
+const TEAL: [u8; 4] = [34, 211, 238, 255];
+const GREY: [u8; 4] = [174, 184, 198, 255];
+const TRACK: [u8; 4] = [46, 56, 70, 255];
+// Markers are white with a near-black ring so they never merge with the fill or the track,
+// on dark or light taskbars, and so they don't depend on telling amber from red.
+const MARK: [u8; 4] = [255, 255, 255, 255];
+const RING: [u8; 4] = [12, 16, 22, 255];
+const QUESTION: [&str; 7] = ["###.", "...#", "...#", ".##.", ".#..", "....", ".#.."];
+const EXCLAIM: [&str; 7] = [".##.", ".##.", ".##.", ".##.", ".##.", "....", ".##."];
+
 pub fn tray_image(rows: &[Allowance]) -> tauri::image::Image<'static> {
     let mut pixels = vec![0; 32 * 32 * 4];
+    let mut put = |x: usize, y: usize, color: &[u8; 4]| {
+        let offset = (y * 32 + x) * 4;
+        pixels[offset..offset + 4].copy_from_slice(color);
+    };
     if rows.is_empty() {
         for x in [7, 15, 23] {
             for y in 14..18 {
                 for dx in 0..3 {
-                    let offset = (y * 32 + x + dx) * 4;
-                    pixels[offset..offset + 4].copy_from_slice(&[174, 184, 198, 255]);
+                    put(x + dx, y, &GREY);
                 }
             }
         }
     }
     let columns = rows.len().clamp(1, 4);
     for (index, row) in rows.iter().take(4).enumerate() {
-        let color = match (row.status, row.remaining_percent) {
-            ("fresh", Some(0.)) | ("restricted", _) => [247, 132, 140, 255],
-            ("fresh", Some(value)) if value < 20. => [245, 181, 68, 255],
-            ("fresh", Some(_)) => [34, 211, 238, 255],
-            _ => [174, 184, 198, 255],
+        let active = matches!(row.status, "fresh" | "restricted");
+        let color = match (active, row.alert) {
+            (false, _) => GREY,
+            (true, Some("critical")) => RED,
+            (true, Some("warning")) => AMBER,
+            (true, _) => TEAL,
         };
         let height = row
             .remaining_percent
             .map(|value| (value * 28. / 100.).round().clamp(2., 28.) as usize);
+        let (left, right) = (1 + index * 32 / columns, (index + 1) * 32 / columns - 1);
         for y in 2..30 {
             let filled = height.map_or((14..16).contains(&y), |height| y >= 30 - height);
-            for x in (1 + index * 32 / columns)..((index + 1) * 32 / columns - 1) {
-                let offset = (y * 32 + x) * 4;
-                pixels[offset..offset + 4].copy_from_slice(if filled {
-                    &color
-                } else {
-                    &[46, 56, 70, 255]
-                });
+            for x in left..right {
+                put(x, y, if filled { &color } else { &TRACK });
+            }
+        }
+        let glyph = match (active, row.alert) {
+            (true, Some("critical")) => &EXCLAIM,
+            (true, Some("warning")) => &QUESTION,
+            (true, Some("surge")) => {
+                // A lit cap on top of the column: still a distinct bright mark at 16 px.
+                for x in left..right {
+                    for y in 2..5 {
+                        put(x, y, &MARK);
+                    }
+                    put(x, 5, &RING);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let scale = if right - left >= 10 { 2 } else { 1 };
+        let (glyph_left, glyph_top) = (
+            left + (right - left - 4 * scale) / 2,
+            2 + (28 - 7 * scale) / 2,
+        );
+        let ink = |x: usize, y: usize| {
+            x >= glyph_left
+                && y >= glyph_top
+                && glyph
+                    .get((y - glyph_top) / scale)
+                    .and_then(|line| line.as_bytes().get((x - glyph_left) / scale))
+                    == Some(&b'#')
+        };
+        for y in glyph_top.saturating_sub(1)..(glyph_top + 7 * scale + 1).min(30) {
+            for x in glyph_left.saturating_sub(1).max(left)..(glyph_left + 4 * scale + 1).min(right)
+            {
+                if ink(x, y) {
+                    put(x, y, &MARK);
+                } else if (x.saturating_sub(1)..=x + 1)
+                    .any(|nx| (y.saturating_sub(1)..=y + 1).any(|ny| ink(nx, ny)))
+                {
+                    put(x, y, &RING);
+                }
             }
         }
     }
@@ -219,19 +323,36 @@ pub fn tray_tooltip(rows: &[Allowance]) -> String {
     if rows.is_empty() {
         return "m-dash · Open Settings to choose allowance windows".into();
     }
-    let mut tooltip = String::from("m-dash · % left (* saved, ! blocked)");
+    // Windows cuts tray tooltips at 127 characters, so the legend lists only the markers in use.
+    let mut lines = String::new();
+    let mut legend = Vec::new();
     for row in rows {
         let value = row
             .remaining_percent
             .map_or("—".into(), |value| format!("{value:.1}%"));
-        let marker = match row.status {
-            "stale" | "resetPending" => "*",
-            "restricted" => "!",
-            _ => "",
+        let (marker, meaning) = match (row.status, row.alert, row.alert_reason) {
+            ("stale" | "resetPending", _, _) => ("*", "saved"),
+            (_, _, Some("restricted")) => ("!", "blocked"),
+            (_, Some("critical"), _) => ("!", "running out"),
+            (_, Some("warning"), _) => ("?", "at risk"),
+            (_, Some("surge"), _) => ("⚡", "fast pace"),
+            _ => ("", ""),
         };
-        tooltip.push_str(&format!("\n{} {}: {value}{marker}", row.label, row.period));
+        if !marker.is_empty() && !legend.contains(&(marker, meaning)) {
+            legend.push((marker, meaning));
+        }
+        lines.push_str(&format!("\n{} {}: {value}{marker}", row.label, row.period));
     }
-    tooltip
+    let legend = legend
+        .iter()
+        .map(|(marker, meaning)| format!("{marker} {meaning}"))
+        .collect::<Vec<_>>();
+    let full = format!("m-dash · % left ({}){lines}", legend.join(", "));
+    if legend.is_empty() || full.chars().count() > 127 {
+        format!("m-dash · % left{lines}")
+    } else {
+        full
+    }
 }
 
 #[cfg(test)]
@@ -502,6 +623,7 @@ mod tests {
             row.remaining_percent = Some(value);
             row.status = "fresh";
         }
+        rows[3].alert = Some("critical");
         let first = tray_image(&rows);
         let pixel = |image: &tauri::image::Image<'_>, x: usize, y: usize| {
             image.rgba()[(y * 32 + x) * 4..(y * 32 + x + 1) * 4].to_vec()
@@ -546,5 +668,117 @@ mod tests {
             [174, 184, 198, 255],
             "saved values are grey"
         );
+    }
+
+    #[test]
+    fn tray_markers_are_white_with_a_dark_ring_and_a_surge_lights_the_cap() {
+        let mut rows = allowances(&legacy_dashboard(), 1000);
+        for (row, alert) in
+            rows.iter_mut()
+                .zip([None, Some("warning"), Some("critical"), Some("surge")])
+        {
+            row.remaining_percent = Some(50.);
+            row.status = "fresh";
+            row.alert = alert;
+        }
+        let image = tray_image(&rows);
+        let pixel =
+            |x: usize, y: usize| image.rgba()[(y * 32 + x) * 4..(y * 32 + x + 1) * 4].to_vec();
+        let column = |left: usize| (left..left + 6).flat_map(|x| (2..30).map(move |y| (x, y)));
+        let count = |left: usize, color: [u8; 4]| {
+            column(left).filter(|(x, y)| pixel(*x, *y) == color).count()
+        };
+        assert_eq!(count(1, MARK), 0, "a healthy bar has no marker");
+        assert!(
+            count(9, MARK) > 0 && count(9, RING) > 0,
+            "amber gets a ringed glyph"
+        );
+        assert_eq!(
+            count(9, AMBER) + count(9, TRACK) + count(9, MARK) + count(9, RING),
+            6 * 28
+        );
+        assert!(
+            count(17, MARK) > 0 && count(17, RED) > 0,
+            "red gets a ringed glyph"
+        );
+        assert_ne!(count(9, MARK), count(17, MARK), "? and ! differ");
+        for x in 25..31 {
+            assert_eq!(
+                (pixel(x, 2), pixel(x, 4), pixel(x, 5)),
+                (MARK.to_vec(), MARK.to_vec(), RING.to_vec())
+            );
+        }
+        assert_eq!(pixel(25, 29), TEAL.to_vec(), "a surge keeps the bar teal");
+        let tooltip = tray_tooltip(&rows);
+        assert!(
+            tooltip.contains("? at risk, ! running out, ⚡ fast pace)"),
+            "{tooltip}"
+        );
+        assert!(tooltip.chars().count() <= 127, "{tooltip}");
+    }
+
+    #[test]
+    fn alerts_come_from_the_window_forecast_with_a_low_remaining_fallback() {
+        let forecasts = [
+            json!({"provider":"Codex","unit":"percentage points","windowId":"codex/primary",
+            "alert":"surge","alertReason":"surge","runsOutAt":5000.,"surgeRatio":2.5}),
+        ];
+        let mut codex = Allowance {
+            label: "Codex",
+            remaining_percent: Some(60.),
+            status: "fresh",
+            window_id: Some("codex/primary".into()),
+            ..Allowance::default()
+        };
+        assess(&mut codex, &forecasts);
+        assert_eq!(
+            (
+                codex.alert,
+                codex.alert_reason,
+                codex.runs_out_at,
+                codex.surge_ratio
+            ),
+            (Some("surge"), Some("surge"), Some(5000), Some(2.5))
+        );
+        let mut other = Allowance {
+            label: "Codex",
+            remaining_percent: Some(60.),
+            status: "fresh",
+            window_id: Some("codex/secondary".into()),
+            ..Allowance::default()
+        };
+        assess(&mut other, &forecasts);
+        assert_eq!(
+            other.alert, None,
+            "another window's forecast does not apply"
+        );
+        let mut low = Allowance {
+            label: "Grok",
+            remaining_percent: Some(15.),
+            status: "fresh",
+            ..Allowance::default()
+        };
+        assess(&mut low, &[]);
+        assert_eq!(
+            (low.alert, low.alert_reason),
+            (Some("warning"), Some("low"))
+        );
+        let mut blocked = Allowance {
+            remaining_percent: Some(90.),
+            status: "restricted",
+            ..Allowance::default()
+        };
+        assess(&mut blocked, &[]);
+        assert_eq!(
+            (blocked.alert, blocked.alert_reason),
+            (Some("critical"), Some("restricted"))
+        );
+        let mut stale = Allowance {
+            remaining_percent: Some(2.),
+            status: "stale",
+            ..Allowance::default()
+        };
+        assess(&mut stale, &[]);
+        assert_eq!(stale.alert, None, "saved readings stay grey");
     }
 }
