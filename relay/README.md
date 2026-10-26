@@ -19,6 +19,9 @@ Use `npm ci` and `npm test` from this directory for synthetic local tests. No
 deployment is required. Operator provisioning, deployment, secret configuration,
 desktop secure enrollment and real-device acceptance are separate operations.
 
+The scoped npm override gives Miniflare the patched `undici` 7.30.1 release.
+Remove it once Miniflare itself requires a patched version.
+
 Known limits: the active-channel cap (four) is global to the deployment and shared
 by every enrollment token, and rate limiting is per client IP only. There is no
 operator route to list or delete channels; recovery uses an epoch rotation. Treat a

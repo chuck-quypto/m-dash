@@ -1,1 +1,1 @@
-{"name":"m-dash-relay","private": true,"license": "Apache-2.0","type":"module","scripts":{"test":"node --test test/*.test.mjs","dev":"wrangler dev","deploy":"wrangler deploy"},"devDependencies":{"miniflare":"5.20261012.1-beta","wrangler":"4.151.1"}}
+{"name":"m-dash-relay","private": true,"license": "Apache-2.0","type":"module","scripts":{"test":"node --test test/*.test.mjs","dev":"wrangler dev","deploy":"wrangler deploy"},"devDependencies":{"miniflare":"5.20261012.1-beta","wrangler":"4.151.1"},"overrides":{"miniflare":{"undici":"7.30.1"}}}
