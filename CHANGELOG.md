@@ -6,6 +6,20 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-27
+
+### Fixed
+- The Claude local feed recovers after its data folder is deleted, for example by
+  the Windows uninstaller's **Delete the application data** option. Before, Claude
+  kept sending token history with the old key, so m-dash showed the feed as on but
+  recorded nothing, and turning it off failed. m-dash now reclaims its own entries
+  in Claude's settings at startup and issues a new key.
+
+### Changed
+- The user guide's Windows upgrade steps now say to choose **Do not uninstall**,
+  and warn that **Delete the application data** permanently removes settings and
+  history.
+
 ## [0.5.1] - 2026-10-26
 
 ### Added
@@ -53,6 +67,7 @@ First public release. Targets Windows x64 and Apple Silicon macOS.
 - Android, encrypted mobile sync and the relay are experimental and are not part
   of this release.
 
-[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/chuck-quypto/m-dash/releases/tag/v0.5.0
