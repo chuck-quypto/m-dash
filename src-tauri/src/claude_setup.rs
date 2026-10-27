@@ -61,6 +61,7 @@ pub fn prepare_receiver(
     settings_path: &Path,
     port: u16,
 ) -> Result<(std::net::TcpListener, Config), String> {
+    adopt_orphaned_feed(directory, settings_path)?;
     let mut config = load(directory)?;
     let was_enabled = if config.suspended || config.env_existed.is_some() {
         let was_enabled = suspend(directory, settings_path)?;
@@ -98,6 +99,53 @@ pub fn prepare_receiver(
             Err("The local Claude receiver could not start, so its feed was disabled for safety. Quit Claude Code and restart m-dash before enabling the feed again.".into())
         }
     }
+}
+
+// Deleting the data directory (the Windows uninstaller offers this) loses the bridge
+// configuration but leaves m-dash's entries in Claude's settings, still carrying the old
+// token. Without this, the feed would look enabled while every upload is rejected, and
+// disabling it would refuse to touch the unrecognized token. Only this directory's exact
+// statusline and the receiver's endpoint shape are reclaimed; anything else is left alone.
+fn adopt_orphaned_feed(directory: &Path, settings_path: &Path) -> Result<(), String> {
+    if directory.join("claude-bridge.json").exists() {
+        return Ok(());
+    }
+    let Ok(settings) = read_settings(settings_path) else {
+        return Ok(());
+    };
+    let status = json!({"type":"command","command":command(directory)?});
+    if settings["statusLine"] != status {
+        return Ok(());
+    }
+    let Some(token) = settings["env"]["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]
+        .as_str()
+        .and_then(|endpoint| endpoint.strip_prefix(&format!("http://127.0.0.1:{PORT}/claude/")))
+        .and_then(|rest| rest.strip_suffix("/logs"))
+        .filter(|token| uuid::Uuid::parse_str(token).is_ok())
+    else {
+        return Ok(());
+    };
+    if managed_env(token)
+        .as_object()
+        .unwrap()
+        .iter()
+        .any(|(key, value)| settings["env"][key] != *value)
+    {
+        return Ok(());
+    }
+    std::fs::create_dir_all(directory)
+        .map_err(|_| "Cannot create the local Claude bridge directory.")?;
+    save_config(
+        directory,
+        &Config {
+            token: token.to_owned(),
+            // Unknown after the loss, so keep Claude's env object when the feed is removed.
+            env_existed: Some(true),
+            suspended: false,
+            cleanup_token: None,
+            managed_command: status["command"].as_str().map(str::to_owned),
+        },
+    )
 }
 
 fn save_config(directory: &Path, config: &Config) -> Result<(), String> {
@@ -409,6 +457,43 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+    #[test]
+    fn a_feed_left_behind_by_a_deleted_data_directory_is_reclaimed_with_a_new_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("app");
+        let settings = directory.path().join("settings.json");
+        std::fs::write(&settings, r#"{"model":"opus"}"#).unwrap();
+        set_enabled(&app, &settings, true).unwrap();
+        let old =
+            read_settings(&settings).unwrap()["env"]["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"].clone();
+        std::fs::remove_dir_all(&app).unwrap();
+        let (_listener, config) = prepare_receiver(&app, &settings, 0).unwrap();
+        let after = read_settings(&settings).unwrap();
+        assert_ne!(after["env"]["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"], old);
+        assert_eq!(
+            after["env"]["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"],
+            managed_env(&config.token)["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]
+        );
+        assert!(enabled(&app, &settings).unwrap());
+        set_enabled(&app, &settings, false).unwrap();
+        let after = read_settings(&settings).unwrap();
+        assert!(after["statusLine"].is_null());
+        assert_eq!(after["model"], "opus");
+        assert_eq!(after["env"], json!({}));
+        set_enabled(&app, &settings, true).unwrap();
+    }
+    #[test]
+    fn a_foreign_feed_is_not_reclaimed_after_the_data_directory_is_lost() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("app");
+        let settings = directory.path().join("settings.json");
+        let foreign = json!({"statusLine":{"type":"command","command":command(&app).unwrap()},
+            "env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOGS_EXPORTER":"otlp","OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":"http/json",
+                "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":"http://collector.example/v1/logs"}});
+        std::fs::write(&settings, foreign.to_string()).unwrap();
+        prepare_receiver(&app, &settings, 0).unwrap();
+        assert_eq!(read_settings(&settings).unwrap(), foreign);
+    }
     #[cfg(unix)]
     #[test]
     fn feed_tokens_are_private_and_settings_keep_their_permissions() {
