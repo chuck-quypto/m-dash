@@ -85,7 +85,7 @@ Minimize for the draggable compact strip; click **m-dash** in the strip or the t
 
 Readings marked saved or stale are last-known values. Collection needs a running computer and internet access; forecasts stop when the evidence is stale or insufficient.
 
-For a Windows manual upgrade, quit m-dash and run the newer installer from Explorer. Keep `%LOCALAPPDATA%\net.chuckdudley.mdash` to retain settings and history. Automatic updating is not included in this first release. See PRIVACY.md for storage details.
+For a Windows manual upgrade, choose **Quit m-dash**, then run the newer installer from Explorer. When it finds the installed version, choose **Do not uninstall**: the new version installs over the old one and keeps your settings and history. If you choose **Uninstall before installing** instead, leave **Delete the application data** unchecked in the uninstaller. That option permanently deletes `%LOCALAPPDATA%\net.chuckdudley.mdash`, which holds every setting, provider choice, Claude ping consent and all history; it is not moved to the Recycle Bin. Automatic updating is not included yet. See PRIVACY.md for storage details.
 
 ## Optional Claude ping
 
