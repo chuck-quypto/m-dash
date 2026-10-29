@@ -174,6 +174,13 @@ fn alert(resource: &Resource, observations: &[Value], latest: u64, result: &mut 
     }
     let left = (reset - latest) as f64;
     let average = resource.consumed.max(0.) / (latest - opened) as f64;
+    // Time left at the same average pace the pace alerts use, so the two can't disagree.
+    let pace_runs_out = latest as f64 + remaining / average;
+    if average > 0. && pace_runs_out < reset as f64 {
+        result["paceRunsOutAt"] = json!(pace_runs_out.round());
+    } else {
+        result["paceLastsToReset"] = json!(true);
+    }
     let projected = average * left;
     let pace = if projected > 2. * remaining {
         2
@@ -186,7 +193,7 @@ fn alert(resource: &Resource, observations: &[Value], latest: u64, result: &mut 
     if pace > 0 && pace >= level {
         level = pace;
         reason = "pace";
-        runs_out = Some(latest as f64 + remaining / average);
+        runs_out = Some(pace_runs_out);
     }
     if level == 0 {
         // Recent pace: the last 30 minutes of a window up to five hours long, else the last 2 hours.
@@ -235,7 +242,8 @@ pub fn estimate(snapshot: &Value, observations: &[Value], now: u64) -> Vec<Value
     resources(snapshot).into_iter().map(|resource| {
         let mut result = json!({"label":resource.label,"unit":resource.unit,"observedAt":latest,"perHour":null,"exhaustsAt":null,"resetsAt":resource.resets_at,
             "resetBeforeExhaustion":false,"sampleCount":0,"sampleMinutes":0,"reason":"Need at least 3 comparable readings across 15 minutes.",
-            "windowId":null,"alert":null,"alertReason":null,"runsOutAt":null,"recentMinutes":null,"surgeRatio":null});
+            "windowId":null,"alert":null,"alertReason":null,"runsOutAt":null,"recentMinutes":null,"surgeRatio":null,
+            "paceRunsOutAt":null,"paceLastsToReset":false});
         if now.saturating_sub(latest)>360 || latest>now {
             result["reason"]=json!("Latest reading is stale; refresh or resume activity."); return result;
         }
@@ -347,6 +355,38 @@ mod tests {
             Some("warning"),
             "red needs more than twice what is left"
         );
+    }
+
+    #[test]
+    fn time_left_uses_the_window_average_pace_and_agrees_with_the_alerts() {
+        let half = WEEK / 2;
+        let amber = alert_at(half, 40., &[]);
+        assert_eq!(amber["paceRunsOutAt"], amber["runsOutAt"]);
+        assert_eq!(amber["paceLastsToReset"], false);
+        let on_track = alert_at(half, 50., &[]);
+        assert!(on_track["alert"].is_null() && on_track["paceRunsOutAt"].is_null());
+        assert_eq!(on_track["paceLastsToReset"], true);
+        let healthy = alert_at(WEEK / 4, 90., &[]);
+        assert_eq!(healthy["paceLastsToReset"], true);
+        let early = alert_at(WEEK / 20, 50., &[]);
+        assert!(early["paceRunsOutAt"].is_null());
+        assert_eq!(
+            early["paceLastsToReset"], false,
+            "no estimate before a tenth of the window"
+        );
+        let untouched = alert_at(half, 100., &[]);
+        assert_eq!(untouched["paceLastsToReset"], true);
+        // A surge keeps its own run-out time; time left still follows the window average.
+        let surge = alert_at(
+            half,
+            60.,
+            &(0..12)
+                .map(|step| (half - 7200 + step * 600, 66. - step as f64 * 0.5))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(surge["alert"].as_str(), Some("surge"));
+        assert!(surge["paceRunsOutAt"].is_null());
+        assert_eq!(surge["paceLastsToReset"], true);
     }
 
     #[test]

@@ -6,6 +6,30 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-29
+
+### Added
+- Each Codex and Claude allowance bar shows how long the allowance lasts at this
+  window's average pace, such as "About 3 hours left at this pace", or "Lasts to
+  reset at this pace". It uses the same pace as the amber and red alerts, so the
+  two always agree, and appears once a tenth of the window has passed. After an
+  idle stretch it lags behind; the ⚡ surge alert still covers a sudden burst.
+
+### Fixed
+- The Claude local feed also recovers when an earlier version already started
+  after its data folder was deleted. That start saved a new key while Claude kept
+  sending token history with the old one, so the Daily history stayed empty and
+  turning the feed off failed. 0.5.2 only reclaimed the feed when the folder was
+  still missing; m-dash now reclaims its own entries whenever Claude holds an
+  older key of the same shape, and issues a new one.
+- Results of Settings actions, including errors, now appear beside the button
+  that produced them. Before, they appeared at the top of the page, so an error
+  from **Disable local feed** could be out of view and the click looked ignored.
+- **Settings saved** and other Settings messages clear when you leave Settings,
+  instead of staying on every page.
+- The ! and ⚡ marks beside large Codex allowance values are readable again.
+  They had picked up the muted color of the "% left" text.
+
 ## [0.5.2] - 2026-10-27
 
 ### Fixed
@@ -67,7 +91,8 @@ First public release. Targets Windows x64 and Apple Silicon macOS.
 - Android, encrypted mobile sync and the relay are experimental and are not part
   of this release.
 
-[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/chuck-quypto/m-dash/releases/tag/v0.5.0
