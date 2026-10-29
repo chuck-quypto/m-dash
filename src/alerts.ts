@@ -14,6 +14,7 @@ export interface AlertFacts {
 interface WindowForecast {
   provider: string; unit: string; windowId?: string | null;
   alert?: Alert | null; alertReason?: AlertReason | null; runsOutAt?: number | null; surgeRatio?: number | null;
+  paceRunsOutAt?: number | null; paceLastsToReset?: boolean;
 }
 
 const bolt = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M6 0L1 6h3l-1 4 5-6H5z" fill="currentColor"/></svg>';
@@ -37,14 +38,33 @@ export function alertSentence(facts: AlertFacts, when: (seconds: number) => stri
   return `At this window's average pace, it ${runsOut}, ${alert === 'critical' ? 'well ' : ''}before ${reset}.`;
 }
 
+function windowForecast(provider: string, windowId: string | null, forecasts: WindowForecast[]) {
+  return forecasts.find(row => row.provider === provider && row.unit === 'percentage points' && (row.windowId ?? null) === windowId);
+}
+
 // The dashboard's version of compact.rs assess(): the window's forecast alert, a blocked window, or
 // the remaining-percent fallback when no forecast covers it.
 export function windowAlert(provider: string, windowId: string | null, remaining: number | null, resetsAt: number | null, restricted: boolean, forecasts: WindowForecast[]): AlertFacts {
   const none: AlertFacts = { alert: null, alertReason: null, runsOutAt: null, resetsAt };
   if (restricted) return { ...none, alert: 'critical', alertReason: 'restricted' };
   if (remaining == null) return none;
-  const forecast = forecasts.find(row => row.provider === provider && row.unit === 'percentage points' && (row.windowId ?? null) === windowId);
+  const forecast = windowForecast(provider, windowId, forecasts);
   if (!forecast) return remaining < 5 ? { ...none, alert: 'critical', alertReason: 'low' } : remaining < 20 ? { ...none, alert: 'warning', alertReason: 'low' } : none;
   if (!forecast.alert) return none;
   return { alert: forecast.alert, alertReason: forecast.alertReason ?? null, runsOutAt: forecast.runsOutAt ?? null, resetsAt, surgeRatio: forecast.surgeRatio ?? null };
+}
+
+// Time left at the window's average pace, the same pace behind the amber and red alerts, so the two
+// can't disagree. forecast.rs leaves both fields empty until a tenth of the window has passed.
+export function timeLeftSentence(provider: string, windowId: string | null, forecasts: WindowForecast[], now: number) {
+  const forecast = windowForecast(provider, windowId, forecasts);
+  if (!forecast) return '';
+  if (forecast.paceLastsToReset) return 'Lasts to reset at this pace.';
+  if (forecast.paceRunsOutAt == null) return '';
+  const minutes = Math.round((forecast.paceRunsOutAt - now) / 60);
+  if (minutes < 1) return 'Runs out within a minute at this pace.';
+  const hours = Math.round(minutes / 60);
+  const days = Math.round(minutes / 1440);
+  const left = minutes < 60 ? `${minutes} min` : hours < 48 ? `${hours} ${hours === 1 ? 'hour' : 'hours'}` : `${days} days`;
+  return `About ${left} left at this pace.`;
 }

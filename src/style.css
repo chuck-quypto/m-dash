@@ -54,6 +54,7 @@ meter.alert-critical::-webkit-meter-optimum-value { background: var(--cnd-danger
 .alert-mark svg { width: 10px; height: 10px; }
 .alert-line { font-size: 12px; line-height: 1.5; color: var(--cnd-fg); margin: 6px 0 0; }
 .support { font-size: 12px; line-height: 1.65; color: var(--cnd-fg-muted); }
+.support.time-left, .muted-card .support.time-left { margin: 4px 0 0; }
 .provider-footer { border-top: 1px solid var(--cnd-line-strong); padding: 12px 0; font-size: 12px; color: var(--cnd-fg-muted); display: flex; justify-content: space-between; gap: 14px; }
 .secondary-providers { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 15px; margin: 16px 0 22px; }
 .muted-card { padding: 18px; background: var(--cnd-surface); border-color: var(--cnd-line-strong); }

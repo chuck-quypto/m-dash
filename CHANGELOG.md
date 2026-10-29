@@ -8,6 +8,13 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [0.5.3] - 2026-10-29
 
+### Added
+- Each Codex and Claude allowance bar shows how long the allowance lasts at this
+  window's average pace, such as "About 3 hours left at this pace", or "Lasts to
+  reset at this pace". It uses the same pace as the amber and red alerts, so the
+  two always agree, and appears once a tenth of the window has passed. After an
+  idle stretch it lags behind; the ⚡ surge alert still covers a sudden burst.
+
 ### Fixed
 - The Claude local feed also recovers when an earlier version already started
   after its data folder was deleted. That start saved a new key while Claude kept
