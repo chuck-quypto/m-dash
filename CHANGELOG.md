@@ -6,6 +6,19 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The Claude local feed also recovers when an earlier version already started
+  after its data folder was deleted. That start saved a new key while Claude kept
+  sending token history with the old one, so the Daily history stayed empty and
+  turning the feed off failed. 0.5.2 only reclaimed the feed when the folder was
+  still missing; m-dash now reclaims its own entries whenever Claude holds an
+  older key of the same shape, and issues a new one.
+- Results of Settings actions, including errors, now appear beside the button
+  that produced them. Before, they appeared at the top of the page, so an error
+  from **Disable local feed** could be out of view and the click looked ignored.
+- **Settings saved** and other Settings messages clear when you leave Settings,
+  instead of staying on every page.
+
 ## [0.5.2] - 2026-10-27
 
 ### Fixed
