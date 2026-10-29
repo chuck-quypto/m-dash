@@ -61,7 +61,7 @@ pub fn prepare_receiver(
     settings_path: &Path,
     port: u16,
 ) -> Result<(std::net::TcpListener, Config), String> {
-    adopt_orphaned_feed(directory, settings_path)?;
+    reclaim_stale_feed(directory, settings_path)?;
     let mut config = load(directory)?;
     let was_enabled = if config.suspended || config.env_existed.is_some() {
         let was_enabled = suspend(directory, settings_path)?;
@@ -101,20 +101,33 @@ pub fn prepare_receiver(
     }
 }
 
-// Deleting the data directory (the Windows uninstaller offers this) loses the bridge
-// configuration but leaves m-dash's entries in Claude's settings, still carrying the old
-// token. Without this, the feed would look enabled while every upload is rejected, and
-// disabling it would refuse to touch the unrecognized token. Only this directory's exact
-// statusline and the receiver's endpoint shape are reclaimed; anything else is left alone.
-fn adopt_orphaned_feed(directory: &Path, settings_path: &Path) -> Result<(), String> {
-    if directory.join("claude-bridge.json").exists() {
-        return Ok(());
-    }
+// Claude can be left holding an endpoint token that the bridge configuration no longer
+// carries. Deleting the data directory (the Windows uninstaller offers this) loses the
+// configuration outright; a version without this check then started, wrote a new
+// configuration with a fresh token and left Claude's old endpoint in place. Either way
+// the statusline keeps working, because it reads the current token, while every
+// telemetry upload is rejected: no token history is recorded, and disabling the feed
+// refuses to touch the unrecognized token. Reclaim the entries only when the statusline
+// is ours and the endpoint has the receiver's exact shape; anything else is left alone.
+// A suspended configuration is skipped because its pending cleanup owns the old token.
+fn reclaim_stale_feed(directory: &Path, settings_path: &Path) -> Result<(), String> {
+    let existing = if directory.join("claude-bridge.json").exists() {
+        let config = load(directory)?;
+        if config.suspended {
+            return Ok(());
+        }
+        Some(config)
+    } else {
+        None
+    };
     let Ok(settings) = read_settings(settings_path) else {
         return Ok(());
     };
-    let status = json!({"type":"command","command":command(directory)?});
-    if settings["statusLine"] != status {
+    let status_command = match &existing {
+        Some(config) => owned_command(directory, config, &settings)?,
+        None => command(directory)?,
+    };
+    if settings["statusLine"] != json!({"type":"command","command":status_command}) {
         return Ok(());
     }
     let Some(token) = settings["env"]["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]
@@ -125,6 +138,12 @@ fn adopt_orphaned_feed(directory: &Path, settings_path: &Path) -> Result<(), Str
     else {
         return Ok(());
     };
+    if existing
+        .as_ref()
+        .is_some_and(|config| config.token == token)
+    {
+        return Ok(());
+    }
     if managed_env(token)
         .as_object()
         .unwrap()
@@ -140,10 +159,12 @@ fn adopt_orphaned_feed(directory: &Path, settings_path: &Path) -> Result<(), Str
         &Config {
             token: token.to_owned(),
             // Unknown after the loss, so keep Claude's env object when the feed is removed.
-            env_existed: Some(true),
+            env_existed: existing
+                .and_then(|config| config.env_existed)
+                .or(Some(true)),
             suspended: false,
             cleanup_token: None,
-            managed_command: status["command"].as_str().map(str::to_owned),
+            managed_command: Some(status_command),
         },
     )
 }
@@ -483,6 +504,41 @@ mod tests {
         set_enabled(&app, &settings, true).unwrap();
     }
     #[test]
+    fn a_feed_whose_configuration_was_recreated_with_a_new_token_is_reclaimed() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = directory.path().join("app");
+        let settings = directory.path().join("settings.json");
+        std::fs::write(&settings, r#"{"model":"opus"}"#).unwrap();
+        set_enabled(&app, &settings, true).unwrap();
+        let old =
+            read_settings(&settings).unwrap()["env"]["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"].clone();
+        // A release without reclaiming started after the data directory was deleted: it
+        // wrote a fresh configuration and left Claude's endpoint on the old token.
+        std::fs::remove_dir_all(&app).unwrap();
+        let recreated = load(&app).unwrap();
+        assert!(enabled(&app, &settings).unwrap());
+        assert_ne!(
+            old,
+            managed_env(&recreated.token)["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]
+        );
+        assert!(set_enabled(&app, &settings, false).is_err());
+        let (_listener, config) = prepare_receiver(&app, &settings, 0).unwrap();
+        let after = read_settings(&settings).unwrap();
+        assert_ne!(config.token, recreated.token);
+        assert_eq!(
+            after["env"]["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"],
+            managed_env(&config.token)["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]
+        );
+        assert!(enabled(&app, &settings).unwrap());
+        set_enabled(&app, &settings, false).unwrap();
+        let after = read_settings(&settings).unwrap();
+        assert!(after["statusLine"].is_null());
+        assert_eq!(after["model"], "opus");
+        assert_eq!(after["env"], json!({}));
+        set_enabled(&app, &settings, true).unwrap();
+        assert!(enabled(&app, &settings).unwrap());
+    }
+    #[test]
     fn a_foreign_feed_is_not_reclaimed_after_the_data_directory_is_lost() {
         let directory = tempfile::tempdir().unwrap();
         let app = directory.path().join("app");
@@ -491,6 +547,9 @@ mod tests {
             "env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOGS_EXPORTER":"otlp","OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":"http/json",
                 "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":"http://collector.example/v1/logs"}});
         std::fs::write(&settings, foreign.to_string()).unwrap();
+        prepare_receiver(&app, &settings, 0).unwrap();
+        assert_eq!(read_settings(&settings).unwrap(), foreign);
+        // The configuration now exists; a foreign endpoint is still not ours to reclaim.
         prepare_receiver(&app, &settings, 0).unwrap();
         assert_eq!(read_settings(&settings).unwrap(), foreign);
     }
