@@ -22,7 +22,7 @@ body:
     id: version
     attributes:
       label: m-dash version and platform
-      placeholder: 0.5.2 on macOS 15.4
+      placeholder: 0.5.3 on macOS 15.4
     validations:
       required: true
   - type: textarea
