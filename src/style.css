@@ -105,6 +105,7 @@ th, td { padding: 11px 15px; border-bottom: 1px solid var(--cnd-line-strong); }
 .connection-row { display: flex; justify-content: space-between; align-items: center; gap: 26px; padding: 24px 0; border-bottom: 1px solid var(--cnd-line-strong); }
 .connection-row p { font-size: 12px; line-height: 1.6; color: var(--cnd-fg-muted); margin: 8px 0 0; }
 .connection-actions { display: grid; gap: 12px; min-width: 130px; }
+.action-notice, .connection-row p.action-notice { margin: 12px 0 0; padding: 9px 13px; border-left: 3px solid var(--cnd-warning); border-radius: 6px; background: var(--cnd-warning-soft); color: var(--cnd-fg); font-size: 12px; line-height: 1.6; }
 .forecast-row { padding: 18px 0; border-bottom: 1px solid var(--cnd-line-strong); }
 .forecast-row strong { font-size: 12px; display: block; }
 .forecast-rate { display: block; font-size: 18px; color: var(--cnd-fg); margin-top: 8px; }
