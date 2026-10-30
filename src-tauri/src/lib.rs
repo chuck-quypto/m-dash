@@ -17,6 +17,7 @@ pub mod mobile_sync;
 pub mod openrouter;
 pub mod settings;
 pub mod store;
+pub mod usage;
 
 use dashboard::{Dashboard, Schedule};
 use settings::{Provider, Providers, Settings};

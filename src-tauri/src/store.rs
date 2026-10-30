@@ -179,13 +179,31 @@ impl Store {
             transaction.execute("INSERT INTO claude_sessions (session,account,updated_at) VALUES (?1,?2,?3)
                 ON CONFLICT(session) DO UPDATE SET account=excluded.account,updated_at=MAX(claude_sessions.updated_at,excluded.updated_at)",
                 params![event.session,event.account,event.occurred_at]).map_err(|_| "Cannot save Claude session identity.")?;
-            if let (Some(request), Some(tokens)) = (event.request, event.tokens) {
+            if let (Some(request), Some(tokens)) = (&event.request, event.tokens) {
                 transaction
                     .execute(
                         "INSERT OR IGNORE INTO claude_requests VALUES (?1,?2,?3,?4)",
                         params![event.account, request, event.occurred_at, tokens],
                     )
                     .map_err(|_| "Cannot save Claude token event.")?;
+                if let Some(detail) = &event.detail {
+                    insert_usage(
+                        &transaction,
+                        &event.account,
+                        "otel",
+                        &format!("claude:{request}"),
+                        event.occurred_at,
+                        detail,
+                    )?;
+                }
+            }
+            if event.rate_limited {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO limit_events VALUES (?1,?2,'rate_limited')",
+                        params![event.account, event.occurred_at],
+                    )
+                    .map_err(|_| "Cannot save Claude limit event.")?;
             }
         }
         transaction
@@ -247,16 +265,25 @@ impl Store {
         ))
     }
     /// Bounds long-running history: drops raw forecast readings and idle Claude sessions after
-    /// 30 days, and folds Claude request identifiers older than 35 whole UTC days into daily totals.
+    /// 30 days, folds Claude request identifiers older than 35 whole UTC days into daily totals,
+    /// folds per-request usage older than 90 whole UTC days into daily rollups, and keeps
+    /// per-window allowance readings and limit events for 400 days.
     pub fn prune(&mut self, now: u64) -> Result<(), String> {
         let horizon = now.saturating_sub(30 * DAY) as i64;
         let request_cutoff = (now.saturating_sub(35 * DAY) / DAY * DAY) as i64;
+        let usage_cutoff = (now.saturating_sub(90 * DAY) / DAY * DAY) as i64;
+        let limit_cutoff = now.saturating_sub(400 * DAY) as i64;
         let transaction = self
             .0
             .transaction()
             .map_err(|_| "Cannot begin pruning usage history.")?;
         transaction.execute("INSERT INTO daily_tokens SELECT account,date(occurred_at,'unixepoch'),SUM(tokens) FROM claude_requests WHERE occurred_at<?1 GROUP BY 1,2
             ON CONFLICT(account,day) DO UPDATE SET tokens=excluded.tokens", [request_cutoff]).map_err(|_| "Cannot retain Claude daily totals.")?;
+        transaction.execute("INSERT INTO usage_daily SELECT account,date(occurred_at,'unixepoch'),surface,COALESCE(model,''),COALESCE(query_source,''),
+            COUNT(*),SUM(input),SUM(output),SUM(cache_read),SUM(cache_write),SUM(reasoning),SUM(cost_micros) FROM usage_events WHERE occurred_at<?1 GROUP BY 1,2,3,4,5
+            ON CONFLICT(account,day,surface,model,query_source) DO UPDATE SET requests=excluded.requests,input=excluded.input,output=excluded.output,
+            cache_read=excluded.cache_read,cache_write=excluded.cache_write,reasoning=excluded.reasoning,cost_micros=excluded.cost_micros", [usage_cutoff])
+            .map_err(|_| "Cannot retain daily usage rollups.")?;
         for (sql, value) in [
             (
                 "DELETE FROM claude_requests WHERE occurred_at<?1",
@@ -267,6 +294,18 @@ impl Store {
                 horizon,
             ),
             ("DELETE FROM observations WHERE observed_at<?1", horizon),
+            (
+                "DELETE FROM usage_events WHERE occurred_at<?1",
+                usage_cutoff,
+            ),
+            (
+                "DELETE FROM limit_readings WHERE observed_at<?1",
+                limit_cutoff,
+            ),
+            (
+                "DELETE FROM limit_events WHERE occurred_at<?1",
+                limit_cutoff,
+            ),
         ] {
             transaction
                 .execute(sql, [value])
@@ -286,7 +325,17 @@ impl Store {
             CREATE TABLE IF NOT EXISTS claude_sessions (session TEXT PRIMARY KEY, account TEXT, quota TEXT, api_duration_ms INTEGER, quota_at INTEGER, updated_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS claude_requests (account TEXT NOT NULL, request TEXT NOT NULL, occurred_at INTEGER NOT NULL, tokens INTEGER NOT NULL, PRIMARY KEY(account,request));
             CREATE TABLE IF NOT EXISTS claude_account_usage (account TEXT PRIMARY KEY, quota TEXT NOT NULL, quota_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, plan TEXT);
-            CREATE INDEX IF NOT EXISTS claude_requests_time ON claude_requests(account,occurred_at);")
+            CREATE INDEX IF NOT EXISTS claude_requests_time ON claude_requests(account,occurred_at);
+            CREATE TABLE IF NOT EXISTS usage_events (account TEXT NOT NULL, source TEXT NOT NULL, key TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+                surface TEXT NOT NULL, model TEXT, effort TEXT, speed TEXT, query_source TEXT, agent TEXT, input INTEGER NOT NULL, output INTEGER NOT NULL,
+                cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, reasoning INTEGER, cost_micros INTEGER, PRIMARY KEY(account,key));
+            CREATE INDEX IF NOT EXISTS usage_events_time ON usage_events(account,occurred_at);
+            CREATE TABLE IF NOT EXISTS usage_daily (account TEXT NOT NULL, day TEXT NOT NULL, surface TEXT NOT NULL, model TEXT NOT NULL, query_source TEXT NOT NULL,
+                requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL,
+                reasoning INTEGER, cost_micros INTEGER, PRIMARY KEY(account,day,surface,model,query_source));
+            CREATE TABLE IF NOT EXISTS limit_readings (account TEXT NOT NULL, window TEXT NOT NULL, observed_at INTEGER NOT NULL, used_percent REAL NOT NULL,
+                resets_at INTEGER, PRIMARY KEY(account,window,observed_at));
+            CREATE TABLE IF NOT EXISTS limit_events (account TEXT NOT NULL, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(account,occurred_at,kind));")
             .map_err(|_| "Cannot initialize local usage history.")?;
         Ok(Self(db))
     }
@@ -313,6 +362,14 @@ impl Store {
                 params![account, time, resources.to_string()],
             )
             .map_err(|_| "Cannot save account observation.")?;
+        for (window, used, resets_at) in crate::usage::windows(snapshot) {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO limit_readings VALUES (?1,?2,?3,?4,?5)",
+                    params![account, window, time, used, resets_at],
+                )
+                .map_err(|_| "Cannot save allowance reading.")?;
+        }
         if let Some(days) = snapshot["dailyUsage"].as_array() {
             for day in days {
                 let date = day["date"]
@@ -354,6 +411,40 @@ impl Store {
             )
             .map_err(|_| "Cannot read observation count.".into())
     }
+}
+
+/// Records one request once per account and key; a replay from another source is ignored.
+pub fn insert_usage(
+    db: &Connection,
+    account: &str,
+    source: &str,
+    key: &str,
+    occurred_at: i64,
+    request: &crate::usage::Request,
+) -> Result<(), String> {
+    db.execute(
+        "INSERT OR IGNORE INTO usage_events VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+        params![
+            account,
+            source,
+            key,
+            occurred_at,
+            request.surface,
+            request.model,
+            request.effort,
+            request.speed,
+            request.query_source,
+            request.agent,
+            request.input,
+            request.output,
+            request.cache_read,
+            request.cache_write,
+            request.reasoning,
+            request.cost_micros
+        ],
+    )
+    .map_err(|_| "Cannot save usage event.")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -540,6 +631,142 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn telemetry_keeps_accounting_detail_and_limit_hits_without_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let attr = |key: &str, value: Value| json!({"key":key,"value":value});
+        let common = || {
+            vec![
+                attr("user.account_uuid", json!({"stringValue":"one"})),
+                attr("organization.id", json!({"stringValue":"org"})),
+                attr("session.id", json!({"stringValue":"s"})),
+                attr(
+                    "event.timestamp",
+                    json!({"stringValue":"1970-01-01T00:16:40Z"}),
+                ),
+            ]
+        };
+        let mut request = common();
+        request.extend([
+            attr("event.name", json!({"stringValue":"api_request"})),
+            attr("request_id", json!({"stringValue":"r1"})),
+            attr("input_tokens", json!({"intValue":"10"})),
+            attr("output_tokens", json!({"intValue":"20"})),
+            attr("cache_read_tokens", json!({"intValue":"300"})),
+            attr("cache_creation_tokens", json!({"intValue":"40"})),
+            attr("model", json!({"stringValue":"claude-opus-5-5"})),
+            attr("cost_usd", json!({"doubleValue":0.0125})),
+            attr("query_source", json!({"stringValue":"subagent"})),
+            attr("agent_id", json!({"stringValue":"agent-1"})),
+            attr("effort", json!({"stringValue":"high"})),
+            attr("ccr.session.id", json!({"stringValue":"cloud-1"})),
+            attr("prompt", json!({"stringValue":"private content"})),
+        ]);
+        let mut limit = common();
+        limit.extend([
+            attr("event.name", json!({"stringValue":"api_error"})),
+            attr("status_code", json!({"intValue":"429"})),
+        ]);
+        let mut other_error = common();
+        other_error.extend([
+            attr("event.name", json!({"stringValue":"api_error"})),
+            attr("status_code", json!({"intValue":"500"})),
+        ]);
+        let logs = json!({"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"claude-code"}}]},
+            "scopeLogs":[{"logRecords":[{"attributes":request},{"attributes":limit},{"attributes":other_error}]}]}]});
+        store.ingest_claude_telemetry(logs.clone(), 1000).unwrap();
+        store.ingest_claude_telemetry(logs, 1000).unwrap();
+        let row: (String, String, String, String, i64, i64, i64, i64, i64) = store.0.query_row(
+            "SELECT surface,model,query_source,agent,input,output,cache_read,cache_write,cost_micros FROM usage_events",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).unwrap();
+        assert_eq!(
+            row,
+            (
+                "cloud".into(),
+                "claude-opus-5-5".into(),
+                "subagent".into(),
+                "agent-1".into(),
+                10,
+                20,
+                300,
+                40,
+                12500
+            )
+        );
+        let count = |sql: &str| {
+            store
+                .0
+                .query_row(sql, [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM usage_events"), 1);
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM limit_events WHERE kind='rate_limited' AND occurred_at=1000"
+            ),
+            1
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM limit_events"), 1);
+        let stored: String = store
+            .0
+            .query_row(
+                "SELECT group_concat(COALESCE(model,'')||COALESCE(agent,'')) FROM usage_events",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains("private"));
+    }
+
+    #[test]
+    fn allowance_readings_and_usage_rollups_outlive_raw_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        store
+            .save(
+                &json!({"accountId":"codex-one","observedAt":1000,"windows":[
+                {"id":"codex/primary","usedPercent":41.0,"remainingPercent":59.0,"resetsAt":9000},
+                {"id":"legacy","remainingPercent":75.0}]}),
+            )
+            .unwrap();
+        let request = crate::usage::Request {
+            surface: "cli".into(),
+            model: Some("m".into()),
+            input: 5,
+            output: 7,
+            cost_micros: Some(3),
+            ..Default::default()
+        };
+        for (key, at) in [("a", 100), ("b", 200), ("c", 95 * DAY as i64)] {
+            insert_usage(&store.0, "codex-one", "test", key, at, &request).unwrap();
+        }
+        store.prune(100 * DAY).unwrap();
+        let count = |store: &Store, sql: &str| {
+            store
+                .0
+                .query_row(sql, [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM observations"), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM limit_readings"), 2);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT CAST(used_percent AS INTEGER) FROM limit_readings WHERE window='legacy'"
+            ),
+            25
+        );
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM usage_events"), 1);
+        assert_eq!(
+            count(&store, "SELECT requests*1000+input FROM usage_daily WHERE day='1970-01-01' AND model='m' AND query_source=''"),
+            2010
+        );
+        store.prune(500 * DAY).unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM limit_readings"), 0);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM usage_daily"), 2);
     }
 
     #[test]
