@@ -78,7 +78,7 @@ struct Segment {
 
 /// Splits a window's readings into stretches that each end where the percentage changed.
 /// Readings are whole or rounded numbers, so a stretch that ends on a change carries a full
-/// step and the usage that produced it. A reset (lower percentage or a new reset time) starts
+/// step and the usage that produced it. A reset (a drop of over a point or a new reset time) starts
 /// over; usage before it belongs to the previous window.
 fn segments(
     readings: &[&Reading],
@@ -93,19 +93,20 @@ fn segments(
             start = Some(reading);
             continue;
         };
-        let reset = reading.used < from.used
+        // Sources round differently (a poll's 41 after a log's 41.3), so a drop under one
+        // point is noise; a larger drop or a new reset time is a new window.
+        let reset = reading.used < from.used - 1.0
             || matches!((from.resets_at, reading.resets_at), (Some(a), Some(b)) if (a - b).abs() > 600);
         if reset {
             start = Some(reading);
             continue;
         }
-        if reading.used == from.used {
+        if reading.used <= from.used {
             continue;
         }
-        let window: Vec<&Usage> = usage
-            .iter()
-            .filter(|row| row.at > from.at && row.at <= reading.at)
-            .collect();
+        // `usage` is sorted by time, so each stretch is one contiguous slice.
+        let window = &usage[usage.partition_point(|row| row.at <= from.at)
+            ..usage.partition_point(|row| row.at <= reading.at)];
         let weighted: f64 = window.iter().map(|row| weighted(provider, row)).sum();
         let cost = window
             .iter()
@@ -174,6 +175,9 @@ pub fn analyze(
     usage: &[Usage],
     server_days: &BTreeMap<String, i64>,
 ) -> Value {
+    let mut sorted = usage.to_vec();
+    sorted.sort_by_key(|row| row.at);
+    let usage = &sorted[..];
     let mut by_window: BTreeMap<&str, Vec<&Reading>> = BTreeMap::new();
     for reading in readings {
         by_window.entry(&reading.window).or_default().push(reading);

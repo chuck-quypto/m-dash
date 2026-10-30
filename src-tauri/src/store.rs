@@ -497,7 +497,7 @@ impl Store {
             .into_iter()
             .filter(|reading| labels.contains_key(&reading.window))
             .collect::<Vec<_>>();
-        let mut query = self.0.prepare("SELECT occurred_at,surface,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2").map_err(error)?;
+        let mut query = self.0.prepare("SELECT occurred_at,surface,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
         let usage = query
             .query_map(params![account, since], |row| {
                 Ok(crate::burn::Usage {
