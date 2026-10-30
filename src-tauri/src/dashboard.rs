@@ -23,6 +23,8 @@ pub struct Dashboard {
     pub openrouter_error: Option<String>,
     pub openrouter_configured: bool,
     pub forecasts: Vec<Value>,
+    /// Burn ledgers keyed by provider, comparing allowance use with observed tokens.
+    pub consistency: Value,
 }
 
 impl Dashboard {

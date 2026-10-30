@@ -451,6 +451,101 @@ impl Store {
             .map_err(|_| "Cannot finish saving local session usage.".into())
     }
 
+    /// The burn ledger for one account over the last `days`, for the windows it reports now.
+    pub fn consistency(
+        &self,
+        provider: crate::burn::Provider,
+        snapshot: &Value,
+        now: u64,
+        days: u64,
+    ) -> Result<Value, String> {
+        let account = snapshot["accountId"]
+            .as_str()
+            .ok_or("Missing ledger account.")?;
+        let since = now.saturating_sub(days * DAY) as i64;
+        let mut labels = std::collections::BTreeMap::new();
+        for window in snapshot["windows"].as_array().into_iter().flatten() {
+            let (Some(id), Some(label)) = (window["id"].as_str(), window["label"].as_str()) else {
+                continue;
+            };
+            let period = match window["durationMins"].as_u64() {
+                Some(300) => " · 5-hour",
+                Some(10080) => " · weekly",
+                _ => "",
+            };
+            let label = if label.contains("allowance") {
+                label.to_owned()
+            } else {
+                format!("{label}{period}")
+            };
+            labels.insert(id.to_owned(), label);
+        }
+        let error = |_| "Cannot read the usage ledger.".to_string();
+        let mut query = self.0.prepare("SELECT window,observed_at,used_percent,resets_at FROM limit_readings WHERE account=?1 AND observed_at>=?2 ORDER BY observed_at").map_err(error)?;
+        let readings = query
+            .query_map(params![account, since], |row| {
+                Ok(crate::burn::Reading {
+                    window: row.get(0)?,
+                    at: row.get(1)?,
+                    used: row.get(2)?,
+                    resets_at: row.get(3)?,
+                })
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?
+            .into_iter()
+            .filter(|reading| labels.contains_key(&reading.window))
+            .collect::<Vec<_>>();
+        let mut query = self.0.prepare("SELECT occurred_at,surface,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2").map_err(error)?;
+        let usage = query
+            .query_map(params![account, since], |row| {
+                Ok(crate::burn::Usage {
+                    at: row.get(0)?,
+                    surface: row.get(1)?,
+                    model: row.get(2)?,
+                    query_source: row.get(3)?,
+                    input: row.get(4)?,
+                    output: row.get(5)?,
+                    cache_read: row.get(6)?,
+                    cache_write: row.get(7)?,
+                    cost_micros: row.get(8)?,
+                })
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let mut server = std::collections::BTreeMap::new();
+        if provider == crate::burn::Provider::Codex {
+            let mut query = self
+                .0
+                .prepare("SELECT day,tokens FROM daily_tokens WHERE account=?1 AND day>=date(?2,'unixepoch')")
+                .map_err(error)?;
+            for row in query
+                .query_map(params![account, since], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(error)?
+            {
+                let (day, tokens) = row.map_err(error)?;
+                server.insert(day, tokens);
+            }
+        }
+        let limit_hits: i64 = self
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM limit_events WHERE account=?1 AND occurred_at>=?2",
+                params![account, since],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        let mut result = crate::burn::analyze(provider, &labels, &readings, &usage, &server);
+        result["account"] = json!(account);
+        result["days"] = json!(days);
+        result["limitHits"] = json!(limit_hits);
+        Ok(result)
+    }
+
     pub fn latest(&self, provider: &str) -> Result<Option<Value>, String> {
         let row: Option<String> = self
             .0
