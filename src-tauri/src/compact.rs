@@ -405,6 +405,7 @@ mod tests {
                     codex: true,
                     ..Default::default()
                 },
+                local_logs: false,
                 compact_windows: None,
             },
             ..Default::default()

@@ -3,7 +3,7 @@ window.isTauri = true;
 let nextCallback = 1;
 const listeners = new Map();
 const now = () => Math.floor(Date.now()/1000);
-let settings = {providers:{codex:true,claude:true,grok:true,openrouter:true},compactWindows:null};
+let settings = {providers:{codex:true,claude:true,grok:true,openrouter:true},compactWindows:null,localLogs:false};
 const state = () => ({
   settings,needsSetup:false,
   claudePing:{enabled:false,message:'Off. No automatic model requests.',lastAttempt:null,lastTokens:null},

@@ -43,6 +43,7 @@ type CompactWindow = 'codexFiveHour' | 'codexWeekly' | 'claudeFiveHour' | 'claud
 interface Settings {
   providers: Record<Provider, boolean>;
   compactWindows: CompactWindow[] | null;
+  localLogs: boolean;
 }
 const providerNames: Record<Provider, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok', openrouter: 'OpenRouter' };
 const compactChoices: { id: CompactWindow; provider: Provider; label: string }[] = [
@@ -70,7 +71,7 @@ interface GrokSnapshot {
 }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
-let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [] };
+let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [] };
 let page: 'overview' | 'history' | 'connections' = 'overview';
 let historyProvider: 'codex' | 'claude' | 'openrouter' = 'codex';
 let setupBusy = false;
@@ -199,6 +200,7 @@ function connections() {
     <fieldset ${setupBusy ? 'disabled' : ''}><legend>Tray icon and compact strip</legend><label class="setting-mode" for="compact-mode">Allowance windows <select id="compact-mode"><option value="auto" ${draft.compactWindows == null ? 'selected' : ''}>Choose automatically</option><option value="custom" ${draft.compactWindows != null ? 'selected' : ''}>Choose up to four</option></select></label>
     <p class="support">Automatic uses reported windows, prioritizing one per enabled provider, then weekly windows, up to four bars. All reported windows remain in the full dashboard. OpenRouter credits appear in the dashboard.</p>
     ${draft.compactWindows == null ? '' : `<div class="compact-options">${compactChoices.filter(choice => draft.providers[choice.provider]).map(choice => `<label class="setting-choice"><input id="window-${choice.id}" type="checkbox" data-window="${choice.id}" ${draft.compactWindows!.includes(choice.id) ? 'checked' : ''}><span>${choice.label}</span></label>`).join('') || '<p class="support">Select a provider with allowances above.</p>'}</div><p class="footnote">A selected window stays unavailable if your provider does not supply it. Limits are read from your account; no Plus/Pro setting is needed.</p>`}</fieldset>
+    <fieldset ${setupBusy ? 'disabled' : ''}><legend>Local session logs</legend><label class="setting-choice"><input id="local-logs" type="checkbox" ${draft.localLogs ? 'checked' : ''}><span><strong>Read Codex and Claude Code session logs on this computer</strong><small>Adds per-request token counts by model and type, including sessions run while m-dash was closed, so allowance use can be compared with tokens. Only accounting fields are kept; conversation content is never stored.</small></span></label></fieldset>
     <div class="settings-actions"><button id="save-settings" class="refresh" type="submit" ${setupBusy ? 'disabled' : ''}>${setupBusy ? 'Saving…' : state.needsSetup ? 'Save and continue' : 'Save settings'}</button><button id="discard-settings" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Revert changes</button><span class="support">Changes apply after saving.</span></div>${noticeLine('preferences')}</form></section>
     <section class="panel settings-panel"><h2>Mobile companion</h2><p>Opt-in encrypted sharing with Android. Credentials and pings stay here.</p><button id="mobile-sync" class="refresh">Set up mobile sync</button></section>
     <section class="panel settings-panel"><h2>Automatic window start</h2>
@@ -239,6 +241,7 @@ function render() {
     if (draft.compactWindows) draft.compactWindows = draft.compactWindows.filter(id => draft.providers[compactChoices.find(choice => choice.id === id)!.provider]);
     render();
   }));
+  root.querySelector<HTMLInputElement>('#local-logs')?.addEventListener('change', event => { settingsDraft!.localLogs = (event.target as HTMLInputElement).checked; });
   root.querySelector<HTMLSelectElement>('#compact-mode')?.addEventListener('change', event => {
     settingsDraft!.compactWindows = (event.target as HTMLSelectElement).value === 'auto' ? null : compactChoices.filter(choice => settingsDraft!.providers[choice.provider]).slice(0, 4).map(choice => choice.id);
     render();
