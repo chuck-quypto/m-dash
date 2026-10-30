@@ -8,7 +8,7 @@ const state = () => ({
   settings,needsSetup:false,
   claudePing:{enabled:false,message:'Off. No automatic model requests.',lastAttempt:null,lastTokens:null},
   refreshing:false,lastAttempt:now(),nextRefresh:Object.values(settings.providers).some(Boolean)?now()+60:null,observations:3,
-  error:null,grokError:null,claudeError:null,claudeUsageError:null,claudeEnabled:false,openrouterError:null,openrouterConfigured:false,consistency,forecasts:[
+  error:null,grokError:null,claudeError:null,claudeUsageError:null,claudeEnabled:false,openrouterError:null,openrouterConfigured:false,consistency,usageRelayError:null,forecasts:[
     {provider:'Codex',label:'Codex',unit:'percentage points',observedAt:now(),perHour:12,exhaustsAt:now()+6000,resetsAt:now()+7200,resetBeforeExhaustion:false,sampleCount:8,sampleMinutes:40,reason:null,windowId:'codex/primary',alert:'critical',alertReason:'pace',runsOutAt:now()+2400,surgeRatio:null},
     {provider:'Codex',label:'Codex',unit:'percentage points',observedAt:now(),perHour:2,exhaustsAt:now()+117000,resetsAt:now()+172800,resetBeforeExhaustion:false,sampleCount:12,sampleMinutes:120,reason:null,windowId:'codex/secondary',alert:'surge',alertReason:'surge',runsOutAt:now()+117000,surgeRatio:2.4},
     {provider:'Claude',label:'Five-hour allowance',unit:'percentage points',observedAt:now(),perHour:30,exhaustsAt:now()+5400,resetsAt:now()+4000,resetBeforeExhaustion:true,sampleCount:6,sampleMinutes:30,reason:null,windowId:'five_hour',alert:'warning',alertReason:'pace',runsOutAt:now()+3600,surgeRatio:null}
@@ -47,6 +47,7 @@ window.__TAURI_INTERNALS__={
     if(command==='plugin:app|version')return '0.4.0-preview';
     if(command==='get_dashboard'||command==='refresh_dashboard')return structuredClone(state());
     if(command==='get_compact_dashboard')return compactRows();
+    if(command==='usage_relay_status'||command==='sync_relay')return null;
     if(command==='save_settings'){settings=structuredClone(args.settings);return structuredClone(state());}
     throw new Error('Preview does not perform '+command);
   }

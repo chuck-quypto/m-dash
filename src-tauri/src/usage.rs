@@ -21,6 +21,9 @@ pub struct Request {
     pub cost_micros: Option<i64>,
 }
 
+/// A request with its account, dedupe key and time.
+pub type Keyed = (String, String, i64, Request);
+
 /// Allowance windows in a normalized snapshot, as (window id, used percent, reset time).
 pub fn windows(snapshot: &serde_json::Value) -> Vec<(String, f64, Option<i64>)> {
     snapshot["windows"]

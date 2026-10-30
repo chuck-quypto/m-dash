@@ -20,6 +20,7 @@ pub mod openrouter;
 pub mod settings;
 pub mod store;
 pub mod usage;
+pub mod usage_relay;
 
 use dashboard::{Dashboard, Schedule};
 use settings::{Provider, Providers, Settings};
@@ -843,11 +844,21 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         }
     }
     read_local_logs(&app, settings_generation).await;
+    let relay_error = usage_relay::sync(|apply| {
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "The collector state is unavailable.".to_string())?;
+        apply(&mut inner.store)
+    })
+    .await
+    .err();
     let mut inner = state
         .0
         .lock()
         .map_err(|_| "The collector state is unavailable.")?;
     inner.dashboard.refreshing = false;
+    inner.dashboard.usage_relay_error = relay_error;
     let now = collector::now();
     if now >= inner.last_prune.saturating_add(86_400) {
         let _ = inner.store.prune(now);
@@ -955,7 +966,7 @@ pub fn run() {
         }))
         .manage(CompactState::default())
         .manage(mobile_sync::State::default())
-        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings])
+        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             macos_lifecycle::install(app.handle());

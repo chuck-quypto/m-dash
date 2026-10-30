@@ -22,6 +22,10 @@ Notable changes to the m-dash desktop app. The format follows
   cost, purpose (main, subagent, compaction), effort, speed and whether it ran
   in a cloud session, and records requests refused for a reached limit.
   Allowance readings are kept for 400 days.
+- Optional **Cloud sessions and other computers** setting shares per-request
+  token counts between your own computers and receives usage from Claude Code
+  cloud sessions through your own relay, so the Allowance vs tokens page can
+  attribute usage this computer never sees. Requires a relay update.
 
 ## [0.5.3] - 2026-10-29
 

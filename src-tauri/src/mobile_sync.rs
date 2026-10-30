@@ -219,7 +219,7 @@ fn save(_: &Saved) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn operator() -> Result<Option<Value>> {
+pub(crate) fn operator() -> Result<Option<Value>> {
     match security_framework::passwords::get_generic_password(
         "net.chuckdudley.mdash/mobile-relay",
         "operator",
@@ -235,13 +235,13 @@ fn operator() -> Result<Option<Value>> {
     }
 }
 #[cfg(windows)]
-fn operator() -> Result<Option<Value>> {
+pub(crate) fn operator() -> Result<Option<Value>> {
     crate::credentials::read_target("net.chuckdudley.mdash/mobile-relay")?
         .map(|bytes| serde_json::from_str(&bytes).map_err(|_| "Relay setup is invalid.".into()))
         .transpose()
 }
 #[cfg(not(any(windows, target_os = "macos")))]
-fn operator() -> Result<Option<Value>> {
+pub(crate) fn operator() -> Result<Option<Value>> {
     Ok(None)
 }
 

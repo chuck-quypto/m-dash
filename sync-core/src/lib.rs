@@ -345,6 +345,19 @@ async fn call(
     }
     serde_json::from_slice(&result).map_err(|_| INVALID.into())
 }
+/// A usage-channel request to a validated relay origin; `path` must be a `/v1/usage` route.
+pub async fn usage_request(
+    origin: &str,
+    path: &str,
+    method: reqwest::Method,
+    token: &str,
+    body: Option<Value>,
+) -> Result<Value> {
+    if !path.starts_with("/v1/usage") {
+        return Err(INVALID.into());
+    }
+    call(&format!("{}{path}", endpoint(origin)?), method, token, body).await
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Phone {
