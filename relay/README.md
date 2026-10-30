@@ -32,3 +32,5 @@ previous deployment needs the coordinated upgrade and re-pairing described
 in the protocol. The migration under `migrations/` applies only to an existing old
 schema; `schema.sql` already includes the column for new databases. Never run both
 on the same new database.
+
+Usage channels (`/v1/usage`) are a separate, opt-in path. A desktop creates one with the enrollment secret; the relay stores only SHA-256 hashes of its ingest and read tokens. Claude Code cloud sessions post OTLP JSON logs to `/v1/usage/<id>/<ingest token>/logs` (the token is in the path because exporters handle header configuration differently), and the Worker keeps only `api_request` accounting fields. Desktops post normalized rows with the ingest token and read them with the read token. Rows expire after 14 days, at most 200,000 rows per channel and four channels per deployment. An existing database needs `migrations/0003_usage_channels.sql` once; `schema.sql` already includes the tables. Cloud environments must allow the relay host in their network access settings.

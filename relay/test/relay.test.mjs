@@ -103,3 +103,32 @@ test('approval retry is idempotent after deadline but cannot approve an expired 
  await db.prepare('UPDATE devices SET approved=0').run();
  assert.equal((await request(root+'/approve','POST',{claim:token('c')},token('w'))).status,410);
 });
+
+const usageRow=(origin,key='claude:r1')=>({provider:'claude',account:'claude:["a","o"]',key,at:1000,surface:'cli',model:'m',effort:null,speed:null,querySource:'main',agent:null,input:1,output:2,cacheRead:3,cacheWrite:4,reasoning:null,costMicros:5,origin});
+test('usage channels keep only accounting rows and separate ingest from reads',async t=>{
+ const {request}=await fixture(t);const id=token('u'),root='/v1/usage/'+id;
+ assert.equal((await request('/v1/usage','POST',{id,ingestHash:digest(token('w')),readHash:digest(token('w'))},token('e'))).status,400);
+ assert.equal((await request('/v1/usage','POST',{id,ingestHash:digest(token('w')),readHash:digest(token('r'))},token('r'))).status,401);
+ assert.equal((await request('/v1/usage','POST',{id,ingestHash:digest(token('w')),readHash:digest(token('r'))},token('e'))).status,201);
+ const now=new Date().toISOString(),attr=(key,value)=>({key,value:{stringValue:value}});
+ const logs={resourceLogs:[{resource:{attributes:[attr('service.name','claude-code')]},scopeLogs:[{logRecords:[
+  {attributes:[attr('event.name','api_request'),attr('user.account_uuid','a'),attr('organization.id','o'),attr('user.email','person@example.com'),attr('request_id','req1'),attr('event.timestamp',now),
+   attr('input_tokens','10'),attr('output_tokens','20'),attr('cache_read_tokens','30'),attr('cache_creation_tokens','40'),attr('model','claude-opus-5-5'),attr('query_source','subagent'),{key:'cost_usd',value:{doubleValue:0.5}},attr('prompt','private')]},
+  {attributes:[attr('event.name','user_prompt'),attr('prompt','private')]}]}]}]};
+ const send=(path,auth)=>request(path,'POST',logs,auth);
+ assert.equal((await send(root+'/'+token('x')+'/logs')).status,401);
+ assert.equal((await send(root+'/'+token('w')+'/logs')).status,200);
+ assert.equal((await send(root+'/'+token('w')+'/logs')).status,200);
+ assert.equal((await request(root+'/rows','POST',{rows:[usageRow(token('d'),'codex:s:1')]},token('r'))).status,401);
+ assert.equal((await request(root+'/rows','POST',{rows:[{...usageRow(token('d')),prompt:'x'}]},token('w'))).status,400);
+ assert.equal((await request(root+'/rows','POST',{rows:[usageRow(token('d'),'codex:s:1')]},token('w'))).status,200);
+ assert.equal((await request(root+'/rows/0','GET',undefined,token('w'))).status,401);
+ const pulled=await (await request(root+'/rows/0','GET',undefined,token('r'))).json();
+ assert.equal(pulled.rows.length,2);
+ const cloud=pulled.rows[0];
+ assert.deepEqual([cloud.account,cloud.key,cloud.surface,cloud.origin,cloud.input,cloud.cacheWrite,cloud.costMicros,cloud.querySource],['claude:["a","o"]','claude:req1','cloud','cloud',10,40,500000,'subagent']);
+ assert.ok(!/private|person@/.test(JSON.stringify(pulled)));
+ assert.equal((await (await request(root+'/rows/'+cloud.seq,'GET',undefined,token('r'))).json()).rows.length,1);
+ assert.equal((await request(root,'DELETE',undefined,token('r'))).status,200);
+ assert.equal((await request(root+'/rows/0','GET',undefined,token('r'))).status,401);
+});

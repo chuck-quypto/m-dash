@@ -32,6 +32,7 @@ interface Dashboard {
   claudePing: { enabled: boolean; message: string; lastAttempt: number | null; lastTokens: number | null };
   forecasts: Forecast[];
   consistency: Ledgers;
+  usageRelayError: string | null;
 }
 interface Forecast {
   provider: string; label: string; unit: string; observedAt: number;
@@ -73,17 +74,22 @@ interface GrokSnapshot {
 }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
-let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [], consistency: {} };
+let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [], consistency: {}, usageRelayError: null };
 let page: 'overview' | 'history' | 'consistency' | 'connections' = 'overview';
 let historyProvider: 'codex' | 'claude' | 'openrouter' = 'codex';
 let setupBusy = false;
 // Results of Settings actions are shown beside the control that produced them and belong to
 // the Settings page: leaving it clears them, so a confirmation never lingers on other pages.
-type NoticeScope = 'preferences' | 'claudeFeed' | 'claudePing' | 'openrouter';
+type NoticeScope = 'preferences' | 'claudeFeed' | 'claudePing' | 'openrouter' | 'usageRelay';
 let notice: { scope: NoticeScope; text: string } | null = null;
 const setNotice = (scope: NoticeScope, text: string) => { notice = text ? { scope, text } : null; };
 const noticeLine = (scope: NoticeScope) => notice?.scope === scope ? `<p class="action-notice" role="status">${escape(notice.text)}</p>` : '';
 let appError = '';
+interface UsageRelay { endpoint: string; cloudEnvironment: string; code: string }
+// undefined until first read; null when this computer has no usage channel.
+let usageRelay: UsageRelay | null | undefined;
+let usageRelayEndpoint = '';
+let usageRelayLoading = false;
 const collectorUnavailable = 'The local collector could not be reached. Restart m-dash and try again.';
 let settingsDraft: Settings | null = null;
 let started = false;
@@ -204,6 +210,7 @@ function connections() {
     ${draft.compactWindows == null ? '' : `<div class="compact-options">${compactChoices.filter(choice => draft.providers[choice.provider]).map(choice => `<label class="setting-choice"><input id="window-${choice.id}" type="checkbox" data-window="${choice.id}" ${draft.compactWindows!.includes(choice.id) ? 'checked' : ''}><span>${choice.label}</span></label>`).join('') || '<p class="support">Select a provider with allowances above.</p>'}</div><p class="footnote">A selected window stays unavailable if your provider does not supply it. Limits are read from your account; no Plus/Pro setting is needed.</p>`}</fieldset>
     <fieldset ${setupBusy ? 'disabled' : ''}><legend>Local session logs</legend><label class="setting-choice"><input id="local-logs" type="checkbox" ${draft.localLogs ? 'checked' : ''}><span><strong>Read Codex and Claude Code session logs on this computer</strong><small>Adds per-request token counts by model and type, including sessions run while m-dash was closed, so allowance use can be compared with tokens. Only accounting fields are kept; conversation content is never stored.</small></span></label></fieldset>
     <div class="settings-actions"><button id="save-settings" class="refresh" type="submit" ${setupBusy ? 'disabled' : ''}>${setupBusy ? 'Saving…' : state.needsSetup ? 'Save and continue' : 'Save settings'}</button><button id="discard-settings" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Revert changes</button><span class="support">Changes apply after saving.</span></div>${noticeLine('preferences')}</form></section>
+    ${usageRelayPanel()}
     <section class="panel settings-panel"><h2>Mobile companion</h2><p>Opt-in encrypted sharing with Android. Credentials and pings stay here.</p><button id="mobile-sync" class="refresh">Set up mobile sync</button></section>
     <section class="panel settings-panel"><h2>Automatic window start</h2>
     <div class="connection-row"><div><h3>Claude ping</h3><p>Start an idle five-hour window with one <strong>ping</strong> to <strong>Haiku 5.5 at low effort</strong>. Off by default. This consumes usage; review the notice before enabling.</p><p>Runs while m-dash is open, including in the menu bar. Use on only one computer per account. Turning off stops future requests; a request already submitted may finish.</p><p role="status">${escape(ping.message)}${ping.lastAttempt ? ` Last attempt: ${dateTime(ping.lastAttempt)}.${ping.lastTokens != null ? ` CLI-reported tokens: ${metric(ping.lastTokens)}.` : ''}` : ''}</p>${noticeLine('claudePing')}</div><button id="claude-ping-toggle" class="refresh" role="switch" aria-checked="${ping.enabled}" aria-label="Automatic Claude ping" ${setupBusy || (!enabled.claude && !ping.enabled) ? 'disabled' : ''}>${ping.enabled ? 'On · turn off' : 'Off · enable…'}</button></div>
@@ -213,6 +220,34 @@ function connections() {
     ${enabled.claude ? `<div class="connection-row"><div><h3>Claude</h3><p>Account allowances are read through your signed-in native Claude CLI every five minutes. This integration uses an experimental Claude contract; a CLI change may require an m-dash update.</p><p>${state.claudeEnabled ? 'Local token feed enabled. Restart Claude Code after setup or restarting m-dash, and keep m-dash running during ordinary work.' : 'Enable the optional local feed for observed token history. Existing custom statuslines or telemetry are preserved and may require manual composition.'}</p><p>Disabling the local feed restores the settings m-dash added and keeps history. Turning off the Claude provider also stops recording local events, but leaves the feed setup in place.</p>${state.claudeUsageError ? `<p class="warning-text">Account usage: ${escape(state.claudeUsageError)}</p>` : ''}${state.claudeError ? `<p class="warning-text">Local feed: ${escape(state.claudeError)}</p>` : ''}${noticeLine('claudeFeed')}</div><button id="claude-toggle" class="refresh" ${setupBusy ? 'disabled' : ''}>${state.claudeEnabled ? 'Disable local feed' : 'Enable local feed'}</button></div>` : ''}
     ${enabled.grok ? `<div class="connection-row"><div><h3>Grok CLI</h3><p>Install the Grok CLI and run grok login, then refresh. Your sign-in supplies plan and billing information; missing allowance percentages stay unavailable.</p>${state.grokError ? `<p class="warning-text">${escape(state.grokError)}</p>` : ''}</div><span class="badge ${state.grokError ? 'warning' : ''}">${state.grokError ? 'Needs attention' : state.grok ? 'Billing connected' : 'Awaiting read'}</span></div>` : ''}
     ${enabled.openrouter ? `<div class="connection-row"><div><h3>OpenRouter</h3><p>${state.openrouterConfigured ? 'Management key saved in your system’s secure credential store.' : 'Account-wide reports require an OpenRouter management key.'} Enter the key in the native secure prompt. The key never enters this web interface. Management keys can administer API keys and budgets; m-dash calls only the read-only credit and activity endpoints.</p><p>Disconnect removes the saved key and keeps local history. Replacing the key starts separate history. <button id="openrouter-settings" class="text-button">OpenRouter management keys ↗</button></p>${state.openrouterError ? `<p class="warning-text">${escape(state.openrouterError)}</p>` : ''}${noticeLine('openrouter')}</div><div class="connection-actions"><button id="openrouter-connect" class="refresh" ${setupBusy ? 'disabled' : ''}>${state.openrouterConfigured ? 'Replace key' : 'Connect key'}</button>${state.openrouterConfigured ? `<button id="openrouter-disconnect" class="text-button" ${setupBusy ? 'disabled' : ''}>Disconnect</button>` : ''}</div></div>` : ''}</section>` : ''}`;
+}
+function usageRelayPanel() {
+  if (usageRelay === undefined) { if (!usageRelayLoading) { usageRelayLoading = true; void loadUsageRelay(); } return ''; }
+  const intro = '<p>Shares per-request token counts between your own computers, and receives usage from Claude Code cloud sessions, through your relay. The relay keeps token counts, model and request identifiers for 14 days; prompts, content and email addresses are dropped before storage. Off unless you set it up.</p>';
+  const body = usageRelay ? `<p class="support">Connected to ${escape(usageRelay.endpoint)}.</p>
+    <h3>Claude Code cloud sessions</h3><p class="support">Add these variables to each cloud environment (Environment settings → Environment variables), and allow the relay host in its network access. New cloud sessions then report their token usage here.</p>
+    <textarea id="usage-relay-env" class="code-block" readonly rows="4" aria-label="Cloud environment variables">${escape(usageRelay.cloudEnvironment)}</textarea><button id="copy-usage-env" class="text-button" type="button">Copy variables</button>
+    <h3>Your other computers</h3><p class="support">On another computer running m-dash, paste this code under <strong>Join a usage channel</strong>. Anyone with it can read your shared usage; keep it private.</p>
+    <textarea id="usage-relay-code" class="code-block" readonly rows="2" aria-label="Usage channel code">${escape(usageRelay.code)}</textarea><button id="copy-usage-code" class="text-button" type="button">Copy code</button>
+    ${state.usageRelayError ? `<p class="warning-text">Last exchange: ${escape(state.usageRelayError)}</p>` : ''}
+    <div class="connection-actions"><button id="usage-relay-leave" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Disconnect this computer</button><button id="usage-relay-delete" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Delete channel and shared rows</button></div>`
+    : `<label class="setting-mode" for="usage-relay-endpoint">Relay <input id="usage-relay-endpoint" type="url" placeholder="https://your-relay.workers.dev" value="${escape(usageRelayEndpoint)}"></label>
+    <label class="setting-mode" for="usage-relay-enrollment">Enrollment secret <input id="usage-relay-enrollment" type="password" autocomplete="off" placeholder="Leave empty to use this computer's relay setup"></label>
+    <button id="usage-relay-create" class="refresh" type="button" ${setupBusy ? 'disabled' : ''}>Create usage channel</button>
+    <label class="setting-mode" for="usage-relay-join">Join a usage channel <input id="usage-relay-join" type="password" autocomplete="off" placeholder="mdash-usage1:…"></label>
+    <button id="usage-relay-join-button" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Join</button>`;
+  return `<section class="panel settings-panel"><h2>Cloud sessions and other computers</h2>${intro}${body}${noticeLine('usageRelay')}</section>`;
+}
+async function loadUsageRelay() {
+  try { usageRelay = await invoke<UsageRelay | null>('usage_relay_status'); usageRelayEndpoint = (await invoke<string | null>('sync_relay')) ?? ''; }
+  catch (error) { usageRelay = null; setNotice('usageRelay', typeof error === 'string' ? error : 'The usage channel could not be read.'); }
+  render();
+}
+async function usageRelayAction(command: string, args: Record<string, unknown>, done: string) {
+  setupBusy = true; notice = null; render();
+  try { usageRelay = await invoke<UsageRelay | null>(command, args); setNotice('usageRelay', done); }
+  catch (error) { setNotice('usageRelay', typeof error === 'string' ? error : 'The usage channel could not be changed.'); }
+  setupBusy = false; render();
 }
 function render() {
   const focused = document.activeElement as HTMLElement | null;
@@ -230,6 +265,15 @@ function render() {
   root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; render(); }));
   root.querySelector<HTMLSelectElement>('#history-provider')?.addEventListener('change', event => { historyProvider = (event.target as HTMLSelectElement).value as typeof historyProvider; render(); });
   root.querySelector<HTMLButtonElement>('#mobile-sync')?.addEventListener('click', openMobileSync);
+  const copy = (button: string, source: string) => root.querySelector<HTMLButtonElement>(button)?.addEventListener('click', event => {
+    const target = event.currentTarget as HTMLButtonElement;
+    navigator.clipboard.writeText(root.querySelector<HTMLTextAreaElement>(source)!.value).then(() => { target.textContent = 'Copied'; }, () => { target.textContent = 'Copy failed'; });
+  });
+  copy('#copy-usage-env', '#usage-relay-env'); copy('#copy-usage-code', '#usage-relay-code');
+  root.querySelector<HTMLButtonElement>('#usage-relay-create')?.addEventListener('click', () => { void usageRelayAction('usage_relay_create', { endpoint: root.querySelector<HTMLInputElement>('#usage-relay-endpoint')!.value.trim(), enrollment: root.querySelector<HTMLInputElement>('#usage-relay-enrollment')!.value.trim() }, 'Usage channel created. Add the variables to your cloud environments and the code to your other computers.'); });
+  root.querySelector<HTMLButtonElement>('#usage-relay-join-button')?.addEventListener('click', () => { void usageRelayAction('usage_relay_join', { code: root.querySelector<HTMLInputElement>('#usage-relay-join')!.value }, 'Joined. Shared usage arrives with the next refresh.'); });
+  root.querySelector<HTMLButtonElement>('#usage-relay-leave')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: false }, 'This computer left the usage channel. Shared rows already received are kept.'); });
+  root.querySelector<HTMLButtonElement>('#usage-relay-delete')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: true }, 'Channel deleted from the relay. Other computers and cloud sessions can no longer use it.'); });
   root.querySelector<HTMLButtonElement>('#copy-ledger')?.addEventListener('click', event => {
     const button = event.currentTarget as HTMLButtonElement;
     navigator.clipboard.writeText(ledgerCsv(state.consistency ?? {})).then(() => { button.textContent = 'Copied'; }, () => { button.textContent = 'Copy failed'; });

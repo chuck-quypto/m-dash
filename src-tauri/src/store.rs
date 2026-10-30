@@ -546,6 +546,107 @@ impl Store {
         Ok(result)
     }
 
+    fn relay_state(&self, channel: &str) -> Result<Value, String> {
+        let text: Option<String> = self
+            .0
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                [format!("usage-relay:{channel}")],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "Cannot read usage channel progress.")?;
+        Ok(text
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| json!({"pushed":0,"seq":0})))
+    }
+
+    fn save_relay_state(db: &Connection, channel: &str, state: &Value) -> Result<(), String> {
+        db.execute("INSERT INTO settings (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("usage-relay:{channel}"), state.to_string()]).map_err(|_| "Cannot save usage channel progress.")?;
+        Ok(())
+    }
+
+    /// Rows recorded on this computer that the usage channel has not received yet, with the
+    /// position to mark once they are sent. Rows received from the channel are never re-sent,
+    /// and rows older than the relay's 14-day retention are not sent at all.
+    pub fn unshared_usage(
+        &self,
+        channel: &str,
+        limit: i64,
+    ) -> Result<(i64, Vec<crate::usage::Keyed>), String> {
+        let after = self.relay_state(channel)?["pushed"].as_i64().unwrap_or(0);
+        let error = |_| "Cannot read usage for the usage channel.".to_string();
+        let mut query = self.0.prepare("SELECT rowid,account,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros
+            FROM usage_events WHERE rowid>?1 AND source!='relay' AND occurred_at>=CAST(strftime('%s','now') AS INTEGER)-1209600 ORDER BY rowid LIMIT ?2").map_err(error)?;
+        let mut last = after;
+        let rows = query
+            .query_map(params![after, limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    crate::usage::Request {
+                        surface: row.get(4)?,
+                        model: row.get(5)?,
+                        effort: row.get(6)?,
+                        speed: row.get(7)?,
+                        query_source: row.get(8)?,
+                        agent: row.get(9)?,
+                        input: row.get(10)?,
+                        output: row.get(11)?,
+                        cache_read: row.get(12)?,
+                        cache_write: row.get(13)?,
+                        reasoning: row.get(14)?,
+                        cost_micros: row.get(15)?,
+                    },
+                ))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?
+            .into_iter()
+            .map(|(rowid, account, key, at, request)| {
+                last = last.max(rowid);
+                (account, key, at, request)
+            })
+            .collect();
+        Ok((last, rows))
+    }
+
+    pub fn mark_shared(&mut self, channel: &str, through: i64) -> Result<(), String> {
+        let mut state = self.relay_state(channel)?;
+        state["pushed"] = json!(through);
+        Self::save_relay_state(&self.0, channel, &state)
+    }
+
+    pub fn relay_cursor(&self, channel: &str) -> Result<i64, String> {
+        Ok(self.relay_state(channel)?["seq"].as_i64().unwrap_or(0))
+    }
+
+    /// Stores rows read from the usage channel together with the read position.
+    pub fn ingest_relay(
+        &mut self,
+        channel: &str,
+        rows: &[(i64, crate::usage::Keyed)],
+        through: i64,
+    ) -> Result<(), String> {
+        let mut state = self.relay_state(channel)?;
+        let transaction = self
+            .0
+            .transaction()
+            .map_err(|_| "Cannot begin saving shared usage.")?;
+        for (_, (account, key, at, request)) in rows {
+            insert_usage(&transaction, account, "relay", key, *at, request)?;
+        }
+        state["seq"] = json!(through);
+        Self::save_relay_state(&transaction, channel, &state)?;
+        transaction
+            .commit()
+            .map_err(|_| "Cannot finish saving shared usage.".into())
+    }
+
     pub fn latest(&self, provider: &str) -> Result<Option<Value>, String> {
         let row: Option<String> = self
             .0
@@ -940,6 +1041,52 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM limit_readings", [], |row| row.get(0))
             .unwrap();
         assert_eq!(readings, 1);
+    }
+
+    #[test]
+    fn usage_channel_sends_local_rows_once_and_never_echoes_received_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let request = crate::usage::Request {
+            surface: "cli".into(),
+            input: 1,
+            ..Default::default()
+        };
+        let now = crate::collector::now() as i64;
+        insert_usage(
+            &store.0,
+            "claude:one",
+            "otel",
+            "old",
+            now - 15 * DAY as i64,
+            &request,
+        )
+        .unwrap();
+        for key in ["a", "b", "c"] {
+            insert_usage(&store.0, "claude:one", "otel", key, now, &request).unwrap();
+        }
+        let (through, rows) = store.unshared_usage("chan", 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        store.mark_shared("chan", through).unwrap();
+        let cloud = crate::usage::Request {
+            surface: "cloud".into(),
+            ..request.clone()
+        };
+        store
+            .ingest_relay(
+                "chan",
+                &[(9, ("claude:one".into(), "cloud-1".into(), 120, cloud))],
+                9,
+            )
+            .unwrap();
+        assert_eq!(store.relay_cursor("chan").unwrap(), 9);
+        let (_, rest) = store.unshared_usage("chan", 10).unwrap();
+        assert_eq!(
+            rest.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
+            ["c"]
+        );
+        assert_eq!(store.unshared_usage("other", 10).unwrap().1.len(), 3);
+        assert_eq!(store.relay_cursor("other").unwrap(), 0);
     }
 
     #[test]
