@@ -276,6 +276,10 @@ pub struct TelemetryEvent {
     pub request: Option<String>,
     pub occurred_at: i64,
     pub tokens: Option<i64>,
+    /// Accounting detail of an API request; never prompt or tool content.
+    pub detail: Option<crate::usage::Request>,
+    /// An API error reporting HTTP 429, which marks a reached allowance.
+    pub rate_limited: bool,
 }
 
 pub fn normalize_telemetry(value: Value, now: u64) -> Result<Vec<TelemetryEvent>, String> {
@@ -301,47 +305,94 @@ pub fn normalize_telemetry(value: Value, now: u64) -> Result<Vec<TelemetryEvent>
                 ) else {
                     continue;
                 };
-                let is_request = attribute(attrs, "event.name").as_str() == Some("api_request")
-                    || record["body"]["stringValue"].as_str() == Some("claude_code.api_request");
+                let named = |name: &str| {
+                    attribute(attrs, "event.name").as_str() == Some(name)
+                        || record["body"]["stringValue"].as_str()
+                            == Some(format!("claude_code.{name}").as_str())
+                };
+                let is_request = named("api_request");
+                let is_limit =
+                    named("api_error") && count(&attribute(attrs, "status_code")) == Some(429);
+                let timestamp = || -> Result<i64, String> {
+                    let stamp = attribute(attrs, "event.timestamp");
+                    let stamp = stamp
+                        .as_str()
+                        .ok_or("Claude token event has no timestamp.")?;
+                    let at = time::OffsetDateTime::parse(
+                        stamp,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .map_err(|_| "Claude token event has an invalid timestamp.")?
+                    .unix_timestamp();
+                    if at < 0 || at > now as i64 + 300 {
+                        return Err("Claude token event has an out-of-range timestamp.".into());
+                    }
+                    Ok(at)
+                };
                 let parsed = (|| -> Result<_, String> {
                     Ok(if is_request {
                         let request = identifier(&attribute(attrs, "request_id"))?;
-                        let stamp = attribute(attrs, "event.timestamp");
-                        let stamp = stamp
-                            .as_str()
-                            .ok_or("Claude token event has no timestamp.")?;
-                        let at = time::OffsetDateTime::parse(
-                            stamp,
-                            &time::format_description::well_known::Rfc3339,
-                        )
-                        .map_err(|_| "Claude token event has an invalid timestamp.")?
-                        .unix_timestamp();
-                        if at < 0 || at > now as i64 + 300 {
-                            return Err("Claude token event has an out-of-range timestamp.".into());
-                        }
-                        let mut total = 0_i64;
-                        for name in [
+                        let at = timestamp()?;
+                        let mut amounts = [0_i64; 4];
+                        for (slot, name) in amounts.iter_mut().zip([
                             "input_tokens",
                             "output_tokens",
                             "cache_read_tokens",
                             "cache_creation_tokens",
-                        ] {
-                            let amount = attribute(attrs, name);
-                            let amount = amount
-                                .as_i64()
-                                .or_else(|| amount.as_str().and_then(|value| value.parse().ok()))
-                                .filter(|amount| *amount >= 0)
+                        ]) {
+                            *slot = count(&attribute(attrs, name))
                                 .ok_or("Claude token event has missing or invalid token counts.")?;
-                            total = total
-                                .checked_add(amount)
-                                .ok_or("Claude token count is too large.")?;
                         }
-                        (Some(request), at, Some(total))
+                        let total = amounts
+                            .iter()
+                            .try_fold(0_i64, |sum, amount| sum.checked_add(*amount))
+                            .ok_or("Claude token count is too large.")?;
+                        let [input, output, cache_read, cache_write] = amounts;
+                        let label = |name: &str| {
+                            attribute(attrs, name)
+                                .as_str()
+                                .filter(|value| !value.is_empty() && value.len() <= 128)
+                                .map(str::to_owned)
+                        };
+                        let cost = count(&attribute(attrs, "cost_usd_micros")).or_else(|| {
+                            let usd = attribute(attrs, "cost_usd");
+                            usd.as_f64()
+                                .or_else(|| usd.as_str().and_then(|text| text.parse().ok()))
+                                .filter(|usd| usd.is_finite() && *usd >= 0.0 && *usd < 1e9)
+                                .map(|usd| (usd * 1e6).round() as i64)
+                        });
+                        let resource = &resource["resource"]["attributes"];
+                        let cloud = !attribute(attrs, "ccr.session.id").is_null()
+                            || !attribute(resource, "ccr.session.id").is_null();
+                        let surface = if cloud {
+                            "cloud".to_owned()
+                        } else if service.as_str() == Some("claude-code-desktop") {
+                            "desktop".to_owned()
+                        } else {
+                            label("app.entrypoint").unwrap_or_else(|| "cli".into())
+                        };
+                        let detail = crate::usage::Request {
+                            surface,
+                            model: label("model"),
+                            effort: label("effort"),
+                            speed: label("speed"),
+                            query_source: label("query_source"),
+                            agent: label("agent_id"),
+                            input,
+                            output,
+                            cache_read,
+                            cache_write,
+                            reasoning: None,
+                            cost_micros: cost,
+                        };
+                        (Some(request), at, Some(total), Some(detail))
+                    } else if is_limit {
+                        (None, timestamp()?, None, None)
                     } else {
-                        (None, now as i64, None)
+                        (None, now as i64, None, None)
                     })
                 })();
-                let Ok((request, occurred_at, tokens)) = parsed else {
+                let Ok((request, occurred_at, tokens, detail)) = parsed else {
                     continue;
                 };
                 events.push(TelemetryEvent {
@@ -350,11 +401,20 @@ pub fn normalize_telemetry(value: Value, now: u64) -> Result<Vec<TelemetryEvent>
                     request,
                     occurred_at,
                     tokens,
+                    detail,
+                    rate_limited: is_limit,
                 });
             }
         }
     }
     Ok(events)
+}
+
+fn count(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        .filter(|amount| *amount >= 0)
 }
 
 fn attribute(attrs: &Value, name: &str) -> Value {
