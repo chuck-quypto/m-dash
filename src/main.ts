@@ -3,6 +3,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
+import { consistencyPage, ledgerCsv, type Ledgers } from './consistency';
 import { alertMark, alertSentence, timeLeftSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
@@ -30,6 +31,7 @@ interface Dashboard {
   openrouter: OpenRouterSnapshot | null; openrouterError: string | null; openrouterConfigured: boolean;
   claudePing: { enabled: boolean; message: string; lastAttempt: number | null; lastTokens: number | null };
   forecasts: Forecast[];
+  consistency: Ledgers;
 }
 interface Forecast {
   provider: string; label: string; unit: string; observedAt: number;
@@ -71,8 +73,8 @@ interface GrokSnapshot {
 }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
-let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [] };
-let page: 'overview' | 'history' | 'connections' = 'overview';
+let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [], consistency: {} };
+let page: 'overview' | 'history' | 'consistency' | 'connections' = 'overview';
 let historyProvider: 'codex' | 'claude' | 'openrouter' = 'codex';
 let setupBusy = false;
 // Results of Settings actions are shown beside the control that produced them and belong to
@@ -219,15 +221,19 @@ function render() {
   const enabledCount = Object.values(state.settings.providers).filter(Boolean).length;
   root.innerHTML = `<header><div class="brand"><div class="brand-mark" aria-hidden="true">M<span>-</span></div><div><strong>m-dash</strong><span>AI resource monitor</span></div></div><div class="header-end"><div class="header-status"><span class="status-dot"></span>Local to this device</div><img class="portfolio-mark" src="${brandMark}" alt="CND monogram" width="84" height="63"></div></header>
     <main><div class="title-row"><div><p class="eyebrow">YOUR AVAILABLE CAPACITY</p><h1>Know what’s left.</h1><p class="intro">Your AI allowances, credits, and resets. Sources always in view.</p></div><button id="refresh" class="refresh" ${state.refreshing || !enabledCount ? 'disabled' : ''}>${state.refreshing ? 'Refreshing…' : 'Refresh accounts'}</button></div>
-    <nav aria-label="Dashboard views">${(['overview', 'history', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
+    <nav aria-label="Dashboard views">${(['overview', 'history', 'consistency', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'consistency' ? 'Allowance vs tokens' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
     ${appError ? `<div class="error" role="alert">${escape(appError)}</div>` : ''}
     ${state.settings.providers.codex && state.error ? `<div class="error" role="status"><strong>Couldn’t refresh Codex.</strong> ${escape(state.error)}${state.snapshot ? ' Showing the last successful observation.' : ''}</div>` : ''}
-    ${page === 'overview' ? overview() : page === 'history' ? history() : connections()}
+    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled) : connections()}
     <footer><span>m-dash ${escape(appVersion)} · Use the tray to open, refresh or quit</span><span>${state.nextRefresh ? `Next refresh ${dateTime(state.nextRefresh)}` : enabledCount ? 'Connect an account to collect readings' : 'Collection paused'}</span></footer></main>`;
   root.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => { void refresh(); });
   root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; render(); }));
   root.querySelector<HTMLSelectElement>('#history-provider')?.addEventListener('change', event => { historyProvider = (event.target as HTMLSelectElement).value as typeof historyProvider; render(); });
   root.querySelector<HTMLButtonElement>('#mobile-sync')?.addEventListener('click', openMobileSync);
+  root.querySelector<HTMLButtonElement>('#copy-ledger')?.addEventListener('click', event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    navigator.clipboard.writeText(ledgerCsv(state.consistency ?? {})).then(() => { button.textContent = 'Copied'; }, () => { button.textContent = 'Copy failed'; });
+  });
   root.querySelector<HTMLButtonElement>('#claude-ping-toggle')?.addEventListener('click', () => { void toggleClaudePing(); });
   root.querySelector<HTMLButtonElement>('#claude-toggle')?.addEventListener('click', () => { void toggleClaude(); });
   root.querySelector<HTMLButtonElement>('#openrouter-settings')?.addEventListener('click', () => { void invoke('open_openrouter_settings').catch(error => { setNotice('openrouter', String(error)); render(); }); });
