@@ -109,17 +109,33 @@ pub fn scan(
         }
         let mut reader = std::io::BufReader::new((&mut file).take(budget));
         let mut line = Vec::new();
+        // Set while discarding an oversized line that spans more than one pass.
+        let mut skipping = cursor.state["skip"] == true;
         loop {
             line.clear();
             let Ok(size) = reader.read_until(b'\n', &mut line) else {
                 break;
             };
-            // Stop at a partial last line; it is read whole on a later pass.
-            if size == 0 || line.last() != Some(&b'\n') {
+            if size == 0 {
+                break;
+            }
+            if line.last() != Some(&b'\n') {
+                // A short partial line is still being written and is read whole later. A long
+                // one holds content, never accounting data, so it is passed over across passes.
+                if skipping || line.len() > LINE_LIMIT {
+                    cursor.offset += size as u64;
+                    budget = budget.saturating_sub(size as u64);
+                    cursor.state["skip"] = json!(true);
+                }
                 break;
             }
             cursor.offset += size as u64;
             budget = budget.saturating_sub(size as u64);
+            if skipping {
+                skipping = false;
+                cursor.state["skip"] = json!(false);
+                continue;
+            }
             if line.len() <= LINE_LIMIT {
                 match kind {
                     Kind::Codex => codex_line(&line, &mut cursor.state, &mut result),
@@ -352,6 +368,36 @@ mod tests {
         assert_eq!(more.requests.len(), 1);
         assert_eq!(more.requests[0].2.input, 100);
         assert!(!format!("{:?}", more.requests).contains("private"));
+    }
+
+    #[test]
+    fn a_line_longer_than_a_pass_is_skipped_without_losing_later_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("p/s.jsonl");
+        let record = |request: &str| {
+            json!({"type":"assistant","timestamp":"2026-10-30T00:00:10Z","requestId":request,
+                "message":{"model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1}}})
+        };
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let huge = "x".repeat(BUDGET as usize + 1024);
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{huge} \"usage\" \"assistant\"\n{}\n",
+                record("r1"),
+                record("r2")
+            ),
+        )
+        .unwrap();
+        let now = crate::collector::now();
+        let mut cursors = HashMap::new();
+        let mut keys = Vec::new();
+        for _ in 0..3 {
+            let pass = scan(Kind::Claude, directory.path(), &cursors, now);
+            keys.extend(pass.requests.into_iter().map(|request| request.0));
+            cursors.extend(pass.cursors);
+        }
+        assert_eq!(keys, ["claude:r1", "claude:r2"]);
     }
 
     #[test]

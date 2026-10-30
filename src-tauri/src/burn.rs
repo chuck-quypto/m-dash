@@ -167,6 +167,19 @@ fn change_point(days: &[(String, f64)]) -> Option<Value> {
     (shift.abs() >= 1.5_f64.ln()).then(|| json!({"date":days[split].0,"factor":shift.exp()}))
 }
 
+/// Whether a request counts toward a window. Claude's model-specific weekly windows count only
+/// their model family; Cowork usage never appears in local logs, so nothing local explains it.
+fn in_scope(window: &str, model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    if window.contains("opus") {
+        model.contains("opus")
+    } else if window.contains("sonnet") {
+        model.contains("sonnet")
+    } else {
+        !window.contains("cowork")
+    }
+}
+
 /// Analyses one account's allowance windows against its observed usage.
 pub fn analyze(
     provider: Provider,
@@ -185,6 +198,17 @@ pub fn analyze(
     let mut windows = Vec::new();
     for (id, mut rows) in by_window {
         rows.sort_by_key(|row| row.at);
+        let scoped: Vec<Usage>;
+        let usage = if id.contains("opus") || id.contains("sonnet") || id.contains("cowork") {
+            scoped = usage
+                .iter()
+                .filter(|row| in_scope(id, &row.model))
+                .cloned()
+                .collect();
+            &scoped[..]
+        } else {
+            usage
+        };
         let (segments, idle) = segments(&rows, usage, provider);
         let mut days: BTreeMap<String, (f64, f64, f64, bool)> = BTreeMap::new();
         for segment in &segments {
@@ -343,6 +367,33 @@ mod tests {
         assert_eq!(window["idleSteps"], json!([4 * DAY + 5000]));
         assert!(window["change"].is_null());
         assert_eq!(result["surfaces"][0]["requests"], 10.0);
+    }
+
+    #[test]
+    fn model_windows_count_only_their_model_family() {
+        let readings = vec![
+            reading("seven_day_opus", 0, 0.0),
+            reading("seven_day_opus", 600, 1.0),
+            reading("seven_day", 0, 0.0),
+            reading("seven_day", 600, 1.0),
+        ];
+        let usage = vec![Usage {
+            model: "claude-sonnet-5-5".into(),
+            ..input(300, 100_000, 0)
+        }];
+        let result = analyze(
+            Provider::Claude,
+            &BTreeMap::new(),
+            &readings,
+            &usage,
+            &BTreeMap::new(),
+        );
+        let windows = result["windows"].as_array().unwrap();
+        assert_eq!(windows[0]["id"], "seven_day");
+        assert_eq!(windows[0]["idlePoints"], 0.0);
+        assert_eq!(windows[1]["id"], "seven_day_opus");
+        assert_eq!(windows[1]["idlePoints"], 1.0);
+        assert!(!in_scope("seven_day_cowork", "claude-opus-5-5"));
     }
 
     #[test]
