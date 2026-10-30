@@ -127,7 +127,7 @@ test('usage channels keep only accounting rows and separate ingest from reads',a
  assert.equal(pulled.rows.length,2);
  const cloud=pulled.rows[0];
  assert.deepEqual([cloud.account,cloud.key,cloud.surface,cloud.origin,cloud.input,cloud.cacheWrite,cloud.costMicros,cloud.querySource],['claude:["a","o"]','claude:req1','cloud','cloud',10,40,500000,'subagent']);
- assert.ok(!JSON.stringify(pulled).includes('private') && !JSON.stringify(pulled).includes('example.com'));
+ assert.ok(!/private|person@/.test(JSON.stringify(pulled)));
  assert.equal((await (await request(root+'/rows/'+cloud.seq,'GET',undefined,token('r'))).json()).rows.length,1);
  assert.equal((await request(root,'DELETE',undefined,token('r'))).status,200);
  assert.equal((await request(root+'/rows/0','GET',undefined,token('r'))).status,401);
