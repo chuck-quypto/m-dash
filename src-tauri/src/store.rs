@@ -335,7 +335,8 @@ impl Store {
                 reasoning INTEGER, cost_micros INTEGER, PRIMARY KEY(account,day,surface,model,query_source));
             CREATE TABLE IF NOT EXISTS limit_readings (account TEXT NOT NULL, window TEXT NOT NULL, observed_at INTEGER NOT NULL, used_percent REAL NOT NULL,
                 resets_at INTEGER, PRIMARY KEY(account,window,observed_at));
-            CREATE TABLE IF NOT EXISTS limit_events (account TEXT NOT NULL, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(account,occurred_at,kind));")
+            CREATE TABLE IF NOT EXISTS limit_events (account TEXT NOT NULL, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(account,occurred_at,kind));
+            CREATE TABLE IF NOT EXISTS log_cursors (provider TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(provider,path));")
             .map_err(|_| "Cannot initialize local usage history.")?;
         Ok(Self(db))
     }
@@ -387,6 +388,164 @@ impl Store {
             .commit()
             .map_err(|_| "Cannot finish saving usage history.".into())
     }
+    /// Saved read positions for one provider's local session logs.
+    pub fn log_cursors(
+        &self,
+        provider: &str,
+    ) -> Result<std::collections::HashMap<String, crate::local_logs::Cursor>, String> {
+        let mut query = self
+            .0
+            .prepare("SELECT path,offset,state FROM log_cursors WHERE provider=?1")
+            .map_err(|_| "Cannot read local log positions.")?;
+        let rows = query
+            .query_map([provider], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|_| "Cannot read local log positions.")?;
+        let mut cursors = std::collections::HashMap::new();
+        for row in rows {
+            let (path, offset, state) = row.map_err(|_| "Cannot read local log positions.")?;
+            cursors.insert(
+                path,
+                crate::local_logs::Cursor {
+                    offset: offset.max(0) as u64,
+                    state: serde_json::from_str(&state).unwrap_or(Value::Null),
+                },
+            );
+        }
+        Ok(cursors)
+    }
+
+    /// Saves one local-log pass for an account atomically with its new read positions.
+    pub fn ingest_local_logs(
+        &mut self,
+        provider: &str,
+        account: &str,
+        scan: crate::local_logs::Scan,
+    ) -> Result<(), String> {
+        let transaction = self
+            .0
+            .transaction()
+            .map_err(|_| "Cannot begin saving local session usage.")?;
+        for (key, at, request) in &scan.requests {
+            insert_usage(&transaction, account, provider, key, *at, request)?;
+        }
+        for (window, at, used, reset) in &scan.readings {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO limit_readings VALUES (?1,?2,?3,?4,?5)",
+                    params![account, window, at, used, reset],
+                )
+                .map_err(|_| "Cannot save allowance reading.")?;
+        }
+        for (path, cursor) in &scan.cursors {
+            transaction.execute("INSERT INTO log_cursors VALUES (?1,?2,?3,?4) ON CONFLICT(provider,path) DO UPDATE SET offset=excluded.offset,state=excluded.state",
+                params![provider, path, cursor.offset as i64, cursor.state.to_string()]).map_err(|_| "Cannot save local log positions.")?;
+        }
+        transaction
+            .commit()
+            .map_err(|_| "Cannot finish saving local session usage.".into())
+    }
+
+    /// The burn ledger for one account over the last `days`, for the windows it reports now.
+    pub fn consistency(
+        &self,
+        provider: crate::burn::Provider,
+        snapshot: &Value,
+        now: u64,
+        days: u64,
+    ) -> Result<Value, String> {
+        let account = snapshot["accountId"]
+            .as_str()
+            .ok_or("Missing ledger account.")?;
+        let since = now.saturating_sub(days * DAY) as i64;
+        let mut labels = std::collections::BTreeMap::new();
+        for window in snapshot["windows"].as_array().into_iter().flatten() {
+            let (Some(id), Some(label)) = (window["id"].as_str(), window["label"].as_str()) else {
+                continue;
+            };
+            let period = match window["durationMins"].as_u64() {
+                Some(300) => " · 5-hour",
+                Some(10080) => " · weekly",
+                _ => "",
+            };
+            let label = if label.contains("allowance") {
+                label.to_owned()
+            } else {
+                format!("{label}{period}")
+            };
+            labels.insert(id.to_owned(), label);
+        }
+        let error = |_| "Cannot read the usage ledger.".to_string();
+        let mut query = self.0.prepare("SELECT window,observed_at,used_percent,resets_at FROM limit_readings WHERE account=?1 AND observed_at>=?2 ORDER BY observed_at").map_err(error)?;
+        let readings = query
+            .query_map(params![account, since], |row| {
+                Ok(crate::burn::Reading {
+                    window: row.get(0)?,
+                    at: row.get(1)?,
+                    used: row.get(2)?,
+                    resets_at: row.get(3)?,
+                })
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?
+            .into_iter()
+            .filter(|reading| labels.contains_key(&reading.window))
+            .collect::<Vec<_>>();
+        let mut query = self.0.prepare("SELECT occurred_at,surface,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
+        let usage = query
+            .query_map(params![account, since], |row| {
+                Ok(crate::burn::Usage {
+                    at: row.get(0)?,
+                    surface: row.get(1)?,
+                    model: row.get(2)?,
+                    query_source: row.get(3)?,
+                    input: row.get(4)?,
+                    output: row.get(5)?,
+                    cache_read: row.get(6)?,
+                    cache_write: row.get(7)?,
+                    cost_micros: row.get(8)?,
+                })
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let mut server = std::collections::BTreeMap::new();
+        if provider == crate::burn::Provider::Codex {
+            let mut query = self
+                .0
+                .prepare("SELECT day,tokens FROM daily_tokens WHERE account=?1 AND day>=date(?2,'unixepoch')")
+                .map_err(error)?;
+            for row in query
+                .query_map(params![account, since], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(error)?
+            {
+                let (day, tokens) = row.map_err(error)?;
+                server.insert(day, tokens);
+            }
+        }
+        let limit_hits: i64 = self
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM limit_events WHERE account=?1 AND occurred_at>=?2",
+                params![account, since],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        let mut result = crate::burn::analyze(provider, &labels, &readings, &usage, &server);
+        result["account"] = json!(account);
+        result["days"] = json!(days);
+        result["limitHits"] = json!(limit_hits);
+        Ok(result)
+    }
+
     pub fn latest(&self, provider: &str) -> Result<Option<Value>, String> {
         let row: Option<String> = self
             .0
@@ -413,7 +572,8 @@ impl Store {
     }
 }
 
-/// Records one request once per account and key; a replay from another source is ignored.
+/// Records one request once per account and key; a replay is ignored.
+/// Telemetry carries cost, effort and surface that a transcript lacks, so it replaces one.
 pub fn insert_usage(
     db: &Connection,
     account: &str,
@@ -423,7 +583,12 @@ pub fn insert_usage(
     request: &crate::usage::Request,
 ) -> Result<(), String> {
     db.execute(
-        "INSERT OR IGNORE INTO usage_events VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+        "INSERT INTO usage_events VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        ON CONFLICT(account,key) DO UPDATE SET source=excluded.source,occurred_at=excluded.occurred_at,surface=excluded.surface,
+        model=excluded.model,effort=excluded.effort,speed=excluded.speed,query_source=excluded.query_source,agent=excluded.agent,
+        input=excluded.input,output=excluded.output,cache_read=excluded.cache_read,cache_write=excluded.cache_write,
+        reasoning=excluded.reasoning,cost_micros=excluded.cost_micros
+        WHERE excluded.source='otel' AND usage_events.source!='otel'",
         params![
             account,
             source,
@@ -525,6 +690,7 @@ mod tests {
                 claude: true,
                 ..Default::default()
             },
+            local_logs: false,
             compact_windows: Some(vec![CompactWindow::ClaudeFiveHour]),
         };
         store.save_settings(&selected).unwrap();
@@ -719,6 +885,61 @@ mod tests {
             )
             .unwrap();
         assert!(!stored.contains("private"));
+    }
+
+    #[test]
+    fn local_log_passes_resume_and_telemetry_replaces_a_transcript_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let transcript = crate::usage::Request {
+            surface: "cli".into(),
+            input: 1,
+            ..Default::default()
+        };
+        let scan = crate::local_logs::Scan {
+            requests: vec![("claude:r1".into(), 100, transcript.clone())],
+            readings: vec![("codex/primary".into(), 100, 12.0, Some(500))],
+            cursors: vec![(
+                "/logs/a.jsonl".into(),
+                crate::local_logs::Cursor {
+                    offset: 42,
+                    state: json!({"session":"s"}),
+                },
+            )],
+        };
+        store
+            .ingest_local_logs("claude_transcript", "claude:one", scan)
+            .unwrap();
+        let cursors = store.log_cursors("claude_transcript").unwrap();
+        assert_eq!(cursors["/logs/a.jsonl"].offset, 42);
+        assert_eq!(cursors["/logs/a.jsonl"].state["session"], "s");
+        assert!(store.log_cursors("codex_rollout").unwrap().is_empty());
+        let telemetry = crate::usage::Request {
+            cost_micros: Some(9),
+            ..transcript.clone()
+        };
+        insert_usage(&store.0, "claude:one", "otel", "claude:r1", 100, &telemetry).unwrap();
+        insert_usage(
+            &store.0,
+            "claude:one",
+            "claude_transcript",
+            "claude:r1",
+            100,
+            &transcript,
+        )
+        .unwrap();
+        let (source, cost): (String, i64) = store
+            .0
+            .query_row("SELECT source,cost_micros FROM usage_events", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((source.as_str(), cost), ("otel", 9));
+        let readings: i64 = store
+            .0
+            .query_row("SELECT COUNT(*) FROM limit_readings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(readings, 1);
     }
 
     #[test]

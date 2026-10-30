@@ -140,3 +140,13 @@ dialog[aria-label="Read-only mobile sync"] input:not([type="checkbox"]), dialog[
 dialog[aria-label="Read-only mobile sync"] button { margin: 6px; padding: 10px; }
 
 [hidden] { display: none !important; }
+
+.ledger-window { border-top: 1px solid var(--cnd-line); padding-top: 14px; margin-top: 14px; }
+.ledger-window:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+.ledger-window h3, .ledger h3 { font-size: 13px; margin: 0 0 8px; }
+.ledger-window h4 { font-size: 12px; font-weight: 600; color: var(--cnd-fg-muted); margin: 14px 0 6px; }
+.ledger-stack { width: 100%; display: flex; flex-direction: column; border-radius: 3px 3px 0 0; overflow: hidden; min-height: 2px; }
+.ledger-explained { background: var(--cnd-accent); }
+.ledger-unattributed { background: var(--cnd-warning); }
+.ledger-hours { height: 48px; }
+.ledger table { margin-top: 10px; }

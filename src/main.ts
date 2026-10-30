@@ -3,6 +3,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
+import { consistencyPage, ledgerCsv, type Ledgers } from './consistency';
 import { alertMark, alertSentence, timeLeftSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
@@ -30,6 +31,7 @@ interface Dashboard {
   openrouter: OpenRouterSnapshot | null; openrouterError: string | null; openrouterConfigured: boolean;
   claudePing: { enabled: boolean; message: string; lastAttempt: number | null; lastTokens: number | null };
   forecasts: Forecast[];
+  consistency: Ledgers;
 }
 interface Forecast {
   provider: string; label: string; unit: string; observedAt: number;
@@ -43,6 +45,7 @@ type CompactWindow = 'codexFiveHour' | 'codexWeekly' | 'claudeFiveHour' | 'claud
 interface Settings {
   providers: Record<Provider, boolean>;
   compactWindows: CompactWindow[] | null;
+  localLogs: boolean;
 }
 const providerNames: Record<Provider, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok', openrouter: 'OpenRouter' };
 const compactChoices: { id: CompactWindow; provider: Provider; label: string }[] = [
@@ -70,8 +73,8 @@ interface GrokSnapshot {
 }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
-let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [] };
-let page: 'overview' | 'history' | 'connections' = 'overview';
+let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [], consistency: {} };
+let page: 'overview' | 'history' | 'consistency' | 'connections' = 'overview';
 let historyProvider: 'codex' | 'claude' | 'openrouter' = 'codex';
 let setupBusy = false;
 // Results of Settings actions are shown beside the control that produced them and belong to
@@ -199,6 +202,7 @@ function connections() {
     <fieldset ${setupBusy ? 'disabled' : ''}><legend>Tray icon and compact strip</legend><label class="setting-mode" for="compact-mode">Allowance windows <select id="compact-mode"><option value="auto" ${draft.compactWindows == null ? 'selected' : ''}>Choose automatically</option><option value="custom" ${draft.compactWindows != null ? 'selected' : ''}>Choose up to four</option></select></label>
     <p class="support">Automatic uses reported windows, prioritizing one per enabled provider, then weekly windows, up to four bars. All reported windows remain in the full dashboard. OpenRouter credits appear in the dashboard.</p>
     ${draft.compactWindows == null ? '' : `<div class="compact-options">${compactChoices.filter(choice => draft.providers[choice.provider]).map(choice => `<label class="setting-choice"><input id="window-${choice.id}" type="checkbox" data-window="${choice.id}" ${draft.compactWindows!.includes(choice.id) ? 'checked' : ''}><span>${choice.label}</span></label>`).join('') || '<p class="support">Select a provider with allowances above.</p>'}</div><p class="footnote">A selected window stays unavailable if your provider does not supply it. Limits are read from your account; no Plus/Pro setting is needed.</p>`}</fieldset>
+    <fieldset ${setupBusy ? 'disabled' : ''}><legend>Local session logs</legend><label class="setting-choice"><input id="local-logs" type="checkbox" ${draft.localLogs ? 'checked' : ''}><span><strong>Read Codex and Claude Code session logs on this computer</strong><small>Adds per-request token counts by model and type, including sessions run while m-dash was closed, so allowance use can be compared with tokens. Only accounting fields are kept; conversation content is never stored.</small></span></label></fieldset>
     <div class="settings-actions"><button id="save-settings" class="refresh" type="submit" ${setupBusy ? 'disabled' : ''}>${setupBusy ? 'Saving…' : state.needsSetup ? 'Save and continue' : 'Save settings'}</button><button id="discard-settings" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Revert changes</button><span class="support">Changes apply after saving.</span></div>${noticeLine('preferences')}</form></section>
     <section class="panel settings-panel"><h2>Mobile companion</h2><p>Opt-in encrypted sharing with Android. Credentials and pings stay here.</p><button id="mobile-sync" class="refresh">Set up mobile sync</button></section>
     <section class="panel settings-panel"><h2>Automatic window start</h2>
@@ -217,15 +221,19 @@ function render() {
   const enabledCount = Object.values(state.settings.providers).filter(Boolean).length;
   root.innerHTML = `<header><div class="brand"><div class="brand-mark" aria-hidden="true">M<span>-</span></div><div><strong>m-dash</strong><span>AI resource monitor</span></div></div><div class="header-end"><div class="header-status"><span class="status-dot"></span>Local to this device</div><img class="portfolio-mark" src="${brandMark}" alt="CND monogram" width="84" height="63"></div></header>
     <main><div class="title-row"><div><p class="eyebrow">YOUR AVAILABLE CAPACITY</p><h1>Know what’s left.</h1><p class="intro">Your AI allowances, credits, and resets. Sources always in view.</p></div><button id="refresh" class="refresh" ${state.refreshing || !enabledCount ? 'disabled' : ''}>${state.refreshing ? 'Refreshing…' : 'Refresh accounts'}</button></div>
-    <nav aria-label="Dashboard views">${(['overview', 'history', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
+    <nav aria-label="Dashboard views">${(['overview', 'history', 'consistency', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'consistency' ? 'Allowance vs tokens' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
     ${appError ? `<div class="error" role="alert">${escape(appError)}</div>` : ''}
     ${state.settings.providers.codex && state.error ? `<div class="error" role="status"><strong>Couldn’t refresh Codex.</strong> ${escape(state.error)}${state.snapshot ? ' Showing the last successful observation.' : ''}</div>` : ''}
-    ${page === 'overview' ? overview() : page === 'history' ? history() : connections()}
+    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled) : connections()}
     <footer><span>m-dash ${escape(appVersion)} · Use the tray to open, refresh or quit</span><span>${state.nextRefresh ? `Next refresh ${dateTime(state.nextRefresh)}` : enabledCount ? 'Connect an account to collect readings' : 'Collection paused'}</span></footer></main>`;
   root.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => { void refresh(); });
   root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; render(); }));
   root.querySelector<HTMLSelectElement>('#history-provider')?.addEventListener('change', event => { historyProvider = (event.target as HTMLSelectElement).value as typeof historyProvider; render(); });
   root.querySelector<HTMLButtonElement>('#mobile-sync')?.addEventListener('click', openMobileSync);
+  root.querySelector<HTMLButtonElement>('#copy-ledger')?.addEventListener('click', event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    navigator.clipboard.writeText(ledgerCsv(state.consistency ?? {})).then(() => { button.textContent = 'Copied'; }, () => { button.textContent = 'Copy failed'; });
+  });
   root.querySelector<HTMLButtonElement>('#claude-ping-toggle')?.addEventListener('click', () => { void toggleClaudePing(); });
   root.querySelector<HTMLButtonElement>('#claude-toggle')?.addEventListener('click', () => { void toggleClaude(); });
   root.querySelector<HTMLButtonElement>('#openrouter-settings')?.addEventListener('click', () => { void invoke('open_openrouter_settings').catch(error => { setNotice('openrouter', String(error)); render(); }); });
@@ -239,6 +247,7 @@ function render() {
     if (draft.compactWindows) draft.compactWindows = draft.compactWindows.filter(id => draft.providers[compactChoices.find(choice => choice.id === id)!.provider]);
     render();
   }));
+  root.querySelector<HTMLInputElement>('#local-logs')?.addEventListener('change', event => { settingsDraft!.localLogs = (event.target as HTMLInputElement).checked; });
   root.querySelector<HTMLSelectElement>('#compact-mode')?.addEventListener('change', event => {
     settingsDraft!.compactWindows = (event.target as HTMLSelectElement).value === 'auto' ? null : compactChoices.filter(choice => settingsDraft!.providers[choice.provider]).slice(0, 4).map(choice => choice.id);
     render();

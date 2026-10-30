@@ -6,6 +6,23 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+### Added
+- A new **Allowance vs tokens** page compares how far each Codex and Claude
+  allowance moved with the tokens seen on this computer over the last 28 days.
+  It learns the account's own points-per-token rate from its most efficient
+  days, shows the rest as unattributed usage (cloud sessions, chat and mobile
+  apps, background agents, other computers), dates any sustained rate shift,
+  and breaks observed usage down by where it ran, its purpose and its model.
+  For Codex it also compares account-wide daily tokens with this computer's.
+  Copy the daily figures as CSV.
+- Optional **Local session logs** setting (off by default) reads the session
+  logs Codex and Claude Code already keep on this computer, keeping only
+  per-request accounting fields.
+- The Claude local feed now keeps each request's model, token types, API-priced
+  cost, purpose (main, subagent, compaction), effort, speed and whether it ran
+  in a cloud session, and records requests refused for a reached limit.
+  Allowance readings are kept for 400 days.
+
 ## [0.5.3] - 2026-10-29
 
 ### Added

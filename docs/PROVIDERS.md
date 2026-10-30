@@ -14,6 +14,7 @@ a redacted description of the error.
 | Codex | `codex app-server` over stdio JSON-RPC: `account/read`, `account/rateLimits/read`, `account/usage/read` | App-server protocol used by Codex integrations | Renamed methods or fields; signing in with an API key instead of a ChatGPT subscription |
 | Claude | Native Claude Code CLI in `--print` stream-JSON mode with a `get_usage` control request, then Claude's saved usage in `~/.claude.json` | **Experimental.** Internal control request and cache format | New or renamed allowance windows; cache format changes; npm wrapper installs instead of the native CLI |
 | Claude (optional local feed) | Claude Code statusline command and OpenTelemetry log exporter, pointed at m-dash's loopback receiver | Documented Claude Code settings | Custom statuslines need manual composition; Claude Code must restart after m-dash restarts |
+| Codex and Claude (optional local session logs) | Reads the CLIs' own session log files on this computer, from a saved position | **Undocumented** file formats | Renamed fields; Codex logs written only in compressed form |
 | Grok | `grok agent --no-leader stdio`: `_x.ai/auth/info` and `_x.ai/billing` | Vendor extension methods | Method or field changes; token history is not available |
 | OpenRouter | HTTPS `GET /api/v1/credits` and `/api/v1/activity` with your management key | Public API | The current UTC day is not reported; management keys must stay valid |
 

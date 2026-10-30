@@ -59,6 +59,9 @@ pub struct Settings {
     pub providers: Providers,
     /// None discovers available windows; Some preserves the user's chosen windows.
     pub compact_windows: Option<Vec<CompactWindow>>,
+    /// Reads accounting fields from Codex and Claude Code session logs on this computer.
+    #[serde(default)]
+    pub local_logs: bool,
 }
 
 impl Settings {
@@ -87,6 +90,7 @@ impl Settings {
                 CompactWindow::ClaudeFiveHour,
                 CompactWindow::GrokAllowance,
             ]),
+            local_logs: false,
         }
     }
 }

@@ -1,3 +1,4 @@
+pub mod burn;
 pub mod claude;
 pub mod claude_feed;
 pub mod claude_ping;
@@ -11,6 +12,7 @@ pub mod credentials;
 pub mod dashboard;
 pub mod forecast;
 pub mod grok;
+pub mod local_logs;
 #[cfg(target_os = "macos")]
 mod macos_lifecycle;
 pub mod mobile_sync;
@@ -840,6 +842,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             }
         }
     }
+    read_local_logs(&app, settings_generation).await;
     let mut inner = state
         .0
         .lock()
@@ -851,6 +854,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         inner.last_prune = now;
     }
     update_forecasts(&mut inner);
+    update_consistency(&mut inner, now);
     inner.update_next_refresh();
     publish_dashboard(&app, &inner.dashboard);
     let dashboard = inner.dashboard.clone();
@@ -870,6 +874,78 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         });
     }
     Ok(dashboard)
+}
+
+/// Rebuilds the burn ledgers for the enabled, signed-in Codex and Claude accounts.
+fn update_consistency(inner: &mut Inner, now: u64) {
+    let providers = inner.dashboard.settings.providers.clone();
+    let mut ledgers = serde_json::Map::new();
+    for (name, enabled, snapshot, provider) in [
+        (
+            "codex",
+            providers.codex,
+            &inner.dashboard.snapshot,
+            burn::Provider::Codex,
+        ),
+        (
+            "claude",
+            providers.claude,
+            &inner.dashboard.claude,
+            burn::Provider::Claude,
+        ),
+    ] {
+        if let Some(snapshot) = snapshot.as_ref().filter(|_| enabled) {
+            if let Ok(ledger) = inner.store.consistency(provider, snapshot, now, 28) {
+                ledgers.insert(name.into(), ledger);
+            }
+        }
+    }
+    inner.dashboard.consistency = serde_json::Value::Object(ledgers);
+}
+
+/// Best-effort: an unreadable log leaves its saved position and is retried on the next pass.
+async fn read_local_logs(app: &tauri::AppHandle, settings_generation: u64) {
+    use local_logs::Kind;
+    for (kind, provider) in [
+        (Kind::Codex, "codex_rollout"),
+        (Kind::Claude, "claude_transcript"),
+    ] {
+        let state = app.state::<AppState>();
+        let Some(root) = local_logs::root(kind) else {
+            continue;
+        };
+        let prepared = (|| {
+            let inner = state.0.lock().ok()?;
+            let settings = &inner.dashboard.settings;
+            let (enabled, snapshot) = match kind {
+                Kind::Codex => (settings.providers.codex, &inner.dashboard.snapshot),
+                Kind::Claude => (settings.providers.claude, &inner.dashboard.claude),
+            };
+            if !settings.local_logs || !enabled || inner.settings_generation != settings_generation
+            {
+                return None;
+            }
+            // Logs name no account, so they are credited to the signed-in one.
+            let account = snapshot.as_ref()?["accountId"].as_str()?.to_owned();
+            Some((account, inner.store.log_cursors(provider).ok()?))
+        })();
+        let Some((account, cursors)) = prepared else {
+            continue;
+        };
+        let now = collector::now();
+        let Ok(scan) = tauri::async_runtime::spawn_blocking(move || {
+            local_logs::scan(kind, &root, &cursors, now)
+        })
+        .await
+        else {
+            continue;
+        };
+        if let Ok(mut inner) = state.0.lock() {
+            if inner.settings_generation == settings_generation {
+                let _ = inner.store.ingest_local_logs(provider, &account, scan);
+            }
+        };
+    }
 }
 
 pub fn run() {
