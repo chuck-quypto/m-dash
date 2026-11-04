@@ -184,7 +184,7 @@ pub fn normalize_usage_cache(value: Value, now: u64) -> Result<Value, String> {
         let required = matches!(id, "five_hour" | "seven_day");
         let reading = (|| -> Result<Option<(f64, u64)>, String> {
             // Newer Claude Code versions report a window without a measurement as null.
-            if window.get("utilization").map_or(true, Value::is_null) {
+            if window.get("utilization").is_none_or(Value::is_null) {
                 return Ok(None);
             }
             let used = window["utilization"]
@@ -193,7 +193,7 @@ pub fn normalize_usage_cache(value: Value, now: u64) -> Result<Value, String> {
                 .ok_or("Claude supplied an invalid allowance percentage.")?
                 // A window past its allowance (for example with extra usage) is fully used.
                 .min(100.0);
-            if window.get("resets_at").map_or(true, Value::is_null) && used == 0.0 {
+            if window.get("resets_at").is_none_or(Value::is_null) && used == 0.0 {
                 return Ok(None);
             }
             let reset = window["resets_at"]
@@ -212,7 +212,7 @@ pub fn normalize_usage_cache(value: Value, now: u64) -> Result<Value, String> {
         let (used, reset) = match reading {
             Ok(Some(reading)) => reading,
             Ok(None) => {
-                if id == "five_hour" && window.get("resets_at").map_or(true, Value::is_null) {
+                if id == "five_hour" && window.get("resets_at").is_none_or(Value::is_null) {
                     five_hour_state = "idle";
                 }
                 continue;
