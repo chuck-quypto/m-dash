@@ -179,24 +179,47 @@ pub fn normalize_usage_cache(value: Value, now: u64) -> Result<Value, String> {
         else {
             continue;
         };
-        let used = window["utilization"]
-            .as_f64()
-            .filter(|used| used.is_finite() && (0.0..=100.0).contains(used))
-            .ok_or("Claude supplied an invalid allowance percentage.")?;
-        if window.get("resets_at").is_some_and(Value::is_null) && used == 0.0 {
-            if id == "five_hour" {
-                five_hour_state = "idle";
+        // Only the 5-hour and 7-day windows are required; a malformed optional
+        // window is dropped rather than discarding the whole account reading.
+        let required = matches!(id, "five_hour" | "seven_day");
+        let reading = (|| -> Result<Option<(f64, u64)>, String> {
+            // Newer Claude Code versions report a window without a measurement as null.
+            if window.get("utilization").map_or(true, Value::is_null) {
+                return Ok(None);
             }
-            continue;
-        }
-        let reset = window["resets_at"]
-            .as_str()
-            .and_then(|text| {
-                time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+            let used = window["utilization"]
+                .as_f64()
+                .filter(|used| used.is_finite() && *used >= 0.0)
+                .ok_or("Claude supplied an invalid allowance percentage.")?
+                // A window past its allowance (for example with extra usage) is fully used.
+                .min(100.0);
+            if window.get("resets_at").map_or(true, Value::is_null) && used == 0.0 {
+                return Ok(None);
+            }
+            let reset = window["resets_at"]
+                .as_str()
+                .and_then(|text| {
+                    time::OffsetDateTime::parse(
+                        text,
+                        &time::format_description::well_known::Rfc3339,
+                    )
                     .ok()
-            })
-            .and_then(|at| u64::try_from(at.unix_timestamp()).ok())
-            .ok_or("Claude supplied an invalid allowance reset time.")?;
+                })
+                .and_then(|at| u64::try_from(at.unix_timestamp()).ok())
+                .ok_or("Claude supplied an invalid allowance reset time.")?;
+            Ok(Some((used, reset)))
+        })();
+        let (used, reset) = match reading {
+            Ok(Some(reading)) => reading,
+            Ok(None) => {
+                if id == "five_hour" && window.get("resets_at").map_or(true, Value::is_null) {
+                    five_hour_state = "idle";
+                }
+                continue;
+            }
+            Err(message) if required => return Err(message),
+            Err(_) => continue,
+        };
         if id == "five_hour" {
             five_hour_state = if reset > now { "active" } else { "expired" };
             five_hour_reset = Some(reset);
@@ -470,8 +493,39 @@ mod tests {
             normalize_usage_cache(value.clone(), 1000).unwrap()["windows"],
             json!([])
         );
+        // A used optional window without a reset time is dropped, not fatal.
         value["cachedUsageUtilization"]["utilization"]["seven_day_opus"]["utilization"] = json!(1);
+        assert_eq!(
+            normalize_usage_cache(value.clone(), 1000).unwrap()["windows"],
+            json!([])
+        );
+        value["cachedUsageUtilization"]["utilization"]["seven_day"]["utilization"] = json!(1);
         assert!(normalize_usage_cache(value, 1000).is_err());
+    }
+
+    #[test]
+    fn current_claude_code_usage_shape_is_accepted() {
+        // Shape written by Claude Code 2.1.3xx: nullable utilization, new keys, limits[].
+        let value = json!({"oauthAccount":{"accountUuid":"one","organizationUuid":"org"},
+            "cachedUsageUtilization":{"accountUuid":"one","fetchedAtMs":1000000,"utilization":{
+                "five_hour":{"utilization":42,"resets_at":"1970-01-01T01:00:00Z"},
+                "seven_day":{"utilization":100.4,"resets_at":"1970-01-03T00:00:00Z"},
+                "seven_day_oauth_apps":null,
+                "seven_day_opus":{"utilization":null,"resets_at":null},
+                "seven_day_sonnet":{"utilization":null,"resets_at":"1970-01-03T00:00:00Z"},
+                "extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null,"utilization":null},
+                "limits":[{"kind":"weekly_scoped","group":"weekly","percent":12,"resets_at":null,
+                    "severity":"normal","is_active":false,"scope":{"model":{"display_name":"Fable"}}}]}}});
+        let snapshot = normalize_usage_cache(value, 1000).unwrap();
+        assert_eq!(snapshot["fiveHourState"], "active");
+        let ids: Vec<_> = snapshot["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|window| window["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["five_hour", "seven_day"]);
+        assert_eq!(snapshot["windows"][1]["remainingPercent"], 0.0);
     }
     use serde_json::json;
 
