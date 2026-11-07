@@ -1,7 +1,7 @@
 {
   "target": "x86_64-unknown-linux-gnu",
   "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
-  "cargoLockSha256": "d2ee764807608603b64c4151012e38c3065b42ec8036a6f2014a8f13629f53ef",
+  "cargoLockSha256": "2f72da2a2516f903abb38c30d1d00c013e5d302212a9e4583bc1c910c2dbc763",
   "packages": [
     {
       "name": "adler2",

@@ -164,7 +164,8 @@ fn change_point(days: &[(String, f64)]) -> Option<Value> {
         }
     }
     let (split, shift) = best?;
-    (shift.abs() >= 1.5_f64.ln()).then(|| json!({"date":days[split].0,"factor":shift.exp()}))
+    (shift.abs() >= 1.5_f64.ln())
+        .then(|| json!({"date":days[split].0,"factor":shift.exp(),"daysAfter":days.len() - split}))
 }
 
 /// Whether a request counts toward a window. Claude's model-specific weekly windows count only
@@ -429,6 +430,7 @@ mod tests {
         assert!(window["pointsPerDollar"].is_null());
         assert_eq!(window["change"]["date"], "1970-01-05");
         assert!((window["change"]["factor"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(window["change"]["daysAfter"], 4);
         assert_eq!(
             result["serverVsLocal"][0],
             json!({"date":"1970-01-01","server":900_000,"local":200_000})

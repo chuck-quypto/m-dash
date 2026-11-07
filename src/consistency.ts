@@ -5,7 +5,7 @@ export interface LedgerWindow {
   id: string; label: string; enough: boolean; activeDays: number;
   pointsPerMillion: number | null; pointsPerDollar: number | null;
   points: number; explained: number; unattributed: number; idlePoints: number; idleSteps: number[];
-  change: { date: string; factor: number } | null; days: LedgerDay[];
+  change: { date: string; factor: number; daysAfter?: number } | null; days: LedgerDay[];
 }
 export interface LedgerSurface {
   surface: string; querySource: string; model: string; requests: number;
@@ -44,7 +44,9 @@ function windowCard(provider: 'codex' | 'claude', window: LedgerWindow) {
   const rate = window.pointsPerMillion == null ? '' : provider === 'claude' && window.pointsPerDollar != null
     ? `One point ≈ ${usd.format(1 / window.pointsPerDollar)} of API-priced usage (${compact.format(1e6 / window.pointsPerMillion)} weighted tokens).`
     : `One point ≈ ${compact.format(1e6 / window.pointsPerMillion)} weighted tokens.`;
-  const change = window.change ? `<p class="warning-text">The rate shifted on ${escape(window.change.date)}: each point now takes ${window.change.factor > 1 ? `${number.format(window.change.factor)}× fewer` : `${number.format(1 / window.change.factor)}× more`} tokens than before.</p>` : '';
+  const shift = window.change;
+  const after = shift?.daysAfter;
+  const change = shift ? `<p class="warning-text">Around ${escape(shift.date)}, each point started matching ${shift.factor > 1 ? `about ${number.format(shift.factor)}× fewer` : `about ${number.format(1 / shift.factor)}× more`} tokens seen on this computer${after ? ` (${after} day${after === 1 ? '' : 's'} of data since)` : ''}. A plan change, a provider change or more usage elsewhere can all cause this.</p>` : '';
   return `<div class="ledger-window"><h3>${escape(window.label)}</h3>
     ${window.enough ? `<p><strong>${number.format(window.points)}</strong> points used · <strong>${number.format(window.explained)}</strong> explained by tokens on this computer · <strong class="${share >= 0.25 ? 'warning-text' : ''}">${number.format(window.unattributed)}</strong> unattributed (${percent.format(share)})</p><p class="support">${rate}</p>${change}${dayBars(window)}`
       : `<p class="empty">Needs three days with both allowance movement and local usage. ${window.activeDays} so far.</p>`}
