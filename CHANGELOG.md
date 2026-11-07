@@ -6,6 +6,11 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+## [0.5.4-rc.1] - 2026-11-07
+
+Release candidate for 0.5.4. Version 0.5.3 was prepared but never published, so
+its changes are included here.
+
 ### Added
 - A new **Allowance vs tokens** page compares how far each Codex and Claude
   allowance moved with the tokens seen on this computer over the last 28 days.
@@ -26,17 +31,21 @@ Notable changes to the m-dash desktop app. The format follows
   token counts between your own computers and receives usage from Claude Code
   cloud sessions through your own relay, so the Allowance vs tokens page can
   attribute usage this computer never sees. Requires a relay update.
-
-## [0.5.3] - 2026-10-29
-
-### Added
 - Each Codex and Claude allowance bar shows how long the allowance lasts at this
   window's average pace, such as "About 3 hours left at this pace", or "Lasts to
   reset at this pace". It uses the same pace as the amber and red alerts, so the
   two always agree, and appears once a tenth of the window has passed. After an
   idle stretch it lags behind; the ⚡ surge alert still covers a sudden burst.
 
+### Changed
+- The Allowance vs tokens rate-shift note now says how many days of data it rests
+  on and that a plan change, a provider change or more usage elsewhere can cause
+  it, instead of presenting the shift as a provider rate change.
+
 ### Fixed
+- Claude allowance readings keep working with the newer usage format saved by
+  recent Claude Code versions, which can leave a window's percentage empty or
+  list per-model limits.
 - The Claude local feed also recovers when an earlier version already started
   after its data folder was deleted. That start saved a new key while Claude kept
   sending token history with the old one, so the Daily history stayed empty and
@@ -112,8 +121,8 @@ First public release. Targets Windows x64 and Apple Silicon macOS.
 - Android, encrypted mobile sync and the relay are experimental and are not part
   of this release.
 
-[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.3...HEAD
-[0.5.3]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...v0.5.3
+[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.1...HEAD
+[0.5.4-rc.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...v0.5.4-rc.1
 [0.5.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/chuck-quypto/m-dash/releases/tag/v0.5.0
