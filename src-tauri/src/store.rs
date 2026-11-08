@@ -8,6 +8,26 @@ pub const LEDGER_DAYS: [u64; 3] = [7, 28, 90];
 
 pub struct Store(Connection);
 
+/// Where a usage row ran, as the ledger and usage list name it: this computer's surface, "cloud",
+/// or "other:<surface>" with "@<name>" once the sending computer has announced its name.
+const WHERE: &str = "CASE WHEN source='relay' AND surface!='cloud' THEN 'other:'||surface||COALESCE('@'||(SELECT name FROM devices WHERE devices.origin=usage_events.origin),'') ELSE surface END";
+
+/// Filters for the usage list. Empty fields match everything.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UsageFilter {
+    pub days: u64,
+    /// One UTC day, YYYY-MM-DD, instead of the last `days`.
+    pub date: String,
+    #[serde(rename = "where")]
+    pub place: String,
+    pub model: String,
+    pub purpose: String,
+    pub page: u64,
+}
+
+const PAGE: u64 = 100;
+
 /// Records the account's plan when it differs from the last one recorded, so the ledger can
 /// date plan changes. Missing or empty plans record nothing.
 fn record_plan(db: &Connection, account: &str, at: i64, plan: Option<&str>) -> Result<(), String> {
@@ -365,9 +385,19 @@ impl Store {
                 resets_at INTEGER, PRIMARY KEY(account,window,observed_at));
             CREATE TABLE IF NOT EXISTS limit_events (account TEXT NOT NULL, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(account,occurred_at,kind));
             CREATE TABLE IF NOT EXISTS log_cursors (provider TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(provider,path));
+            CREATE TABLE IF NOT EXISTS devices (origin TEXT PRIMARY KEY, name TEXT NOT NULL, details TEXT NOT NULL, announced_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS ledger_marks (account TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL,
                 PRIMARY KEY(account,at,kind,source));")
             .map_err(|_| "Cannot initialize local usage history.")?;
+        // Which computer sent each shared row, so usage can be named by computer.
+        let has_origin: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('usage_events') WHERE name='origin'")
+            .and_then(|mut query| query.exists([]))
+            .map_err(|_| "Cannot initialize local usage history.")?;
+        if !has_origin {
+            db.execute("ALTER TABLE usage_events ADD COLUMN origin TEXT", [])
+                .map_err(|_| "Cannot initialize local usage history.")?;
+        }
         // Plans seen before plan changes were recorded: the last 30 days of Codex observations.
         db.execute("INSERT OR IGNORE INTO ledger_marks SELECT account,observed_at,'plan','auto',plan FROM
             (SELECT account,observed_at,plan,LAG(plan) OVER (PARTITION BY account ORDER BY observed_at) AS previous FROM
@@ -536,7 +566,7 @@ impl Store {
             .into_iter()
             .filter(|reading| labels.contains_key(&reading.window))
             .collect::<Vec<_>>();
-        let mut query = self.0.prepare("SELECT occurred_at,CASE WHEN source='relay' AND surface!='cloud' THEN 'other:'||surface ELSE surface END,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
+        let mut query = self.0.prepare(&format!("SELECT occurred_at,{WHERE},COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at")).map_err(error)?;
         let usage = query
             .query_map(params![account, since], |row| {
                 Ok(crate::burn::Usage {
@@ -661,6 +691,228 @@ impl Store {
             )
             .map_err(|_| "Cannot remove the note.")?;
         Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>, String> {
+        self.0
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|_| "Cannot read a saved setting.".into())
+    }
+
+    pub fn save_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        self.0
+            .execute("INSERT INTO settings (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])
+            .map_err(|_| "Cannot save a setting.")?;
+        Ok(())
+    }
+
+    /// Notes which computer sent each shared row and saves other computers' announcements.
+    pub fn relay_details(
+        &mut self,
+        origins: &[(String, String, String)],
+        devices: &[crate::usage_relay::Announced],
+    ) -> Result<(), String> {
+        let error = |_| "Cannot save shared computer details.".to_string();
+        let transaction = self.0.transaction().map_err(error)?;
+        for (account, key, origin) in origins {
+            transaction
+                .execute(
+                    "UPDATE usage_events SET origin=?3 WHERE account=?1 AND key=?2 AND source='relay'",
+                    params![account, key, origin],
+                )
+                .map_err(error)?;
+        }
+        for device in devices {
+            transaction
+                .execute(
+                    "INSERT INTO devices VALUES (?1,?2,?3,?4) ON CONFLICT(origin) DO UPDATE SET name=excluded.name,
+                    details=excluded.details,announced_at=excluded.announced_at WHERE excluded.announced_at>=devices.announced_at",
+                    params![device.origin, device.name, device.details, device.at],
+                )
+                .map_err(error)?;
+        }
+        transaction.commit().map_err(error)
+    }
+
+    /// The computers and cloud sessions that report usage to this one: each other computer's
+    /// name, setup and last usage, and when a cloud session last reported.
+    pub fn computers(&self) -> Result<Value, String> {
+        let error = |_| "Cannot read shared computers.".to_string();
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT origin,name,details,announced_at,(SELECT MAX(occurred_at) FROM usage_events WHERE usage_events.origin=devices.origin) FROM devices
+                UNION ALL SELECT origin,NULL,NULL,NULL,MAX(occurred_at) FROM usage_events WHERE source='relay' AND origin IS NOT NULL AND origin!='cloud'
+                    AND origin NOT IN (SELECT origin FROM devices) GROUP BY origin",
+            )
+            .map_err(error)?;
+        let others = query
+            .query_map([], |row| {
+                Ok(json!({"name":row.get::<_, Option<String>>(1)?,"details":row.get::<_, Option<String>>(2)?,
+                    "announcedAt":row.get::<_, Option<i64>>(3)?,"lastUsage":row.get::<_, Option<i64>>(4)?}))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let cloud: Option<i64> = self
+            .0
+            .query_row(
+                "SELECT MAX(occurred_at) FROM usage_events WHERE source='relay' AND surface='cloud'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        Ok(json!({"others":others,"cloudLastUsage":cloud}))
+    }
+
+    /// One page of an account's usage rows, newest first, with the allowance steps in the same
+    /// span, the filter choices available and, with `csv`, every matching row instead of a page.
+    pub fn usage_list(
+        &self,
+        account: &str,
+        filter: &UsageFilter,
+        now: u64,
+        csv: bool,
+    ) -> Result<Value, String> {
+        let error = |_| "Cannot read the usage list.".to_string();
+        let (from, to) = if filter.date.is_empty() {
+            let days = if LEDGER_DAYS.contains(&filter.days) {
+                filter.days
+            } else {
+                28
+            };
+            (now.saturating_sub(days * DAY) as i64, i64::MAX)
+        } else {
+            let day: i64 = self
+                .0
+                .query_row("SELECT unixepoch(?1)", [&filter.date], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })
+                .map_err(error)?
+                .ok_or("Choose a valid date.")?;
+            (day, day + DAY as i64)
+        };
+        let matching = format!(
+            "FROM usage_events WHERE account=?1 AND occurred_at>=?2 AND occurred_at<?3
+            AND (?4='' OR {WHERE}=?4) AND (?5='' OR COALESCE(model,'')=?5) AND (?6='' OR COALESCE(query_source,'')=?6)"
+        );
+        let params = params![
+            account,
+            from,
+            to,
+            filter.place,
+            filter.model,
+            filter.purpose
+        ];
+        let total: i64 = self
+            .0
+            .query_row(&format!("SELECT COUNT(*) {matching}"), params, |row| {
+                row.get(0)
+            })
+            .map_err(error)?;
+        let (limit, offset) = if csv {
+            (20_000, 0)
+        } else {
+            (PAGE as i64, (filter.page * PAGE) as i64)
+        };
+        let mut query = self
+            .0
+            .prepare(&format!(
+                "SELECT occurred_at,{WHERE},COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros
+                {matching} ORDER BY occurred_at DESC,rowid DESC LIMIT {limit} OFFSET {offset}"
+            ))
+            .map_err(error)?;
+        let rows = query
+            .query_map(params, |row| {
+                Ok(json!({"at":row.get::<_, i64>(0)?,"where":row.get::<_, String>(1)?,"model":row.get::<_, String>(2)?,
+                    "purpose":row.get::<_, String>(3)?,"input":row.get::<_, i64>(4)?,"output":row.get::<_, i64>(5)?,
+                    "cacheRead":row.get::<_, i64>(6)?,"cacheWrite":row.get::<_, i64>(7)?,"costMicros":row.get::<_, Option<i64>>(8)?}))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        if csv {
+            let mut text = String::from(
+                "time_utc,where,model,purpose,input,output,cache_read,cache_write,api_price_usd\n",
+            );
+            let quote = |value: &Value| {
+                format!(
+                    "\"{}\"",
+                    value.as_str().unwrap_or_default().replace('"', "\"\"")
+                )
+            };
+            for row in &rows {
+                let time = time::OffsetDateTime::from_unix_timestamp(
+                    row["at"].as_i64().unwrap_or_default(),
+                )
+                .ok()
+                .and_then(|time| {
+                    time.format(&time::format_description::well_known::Rfc3339)
+                        .ok()
+                })
+                .unwrap_or_default();
+                let price = row["costMicros"]
+                    .as_i64()
+                    .map(|micros| format!("{:.6}", micros as f64 / 1e6))
+                    .unwrap_or_default();
+                text.push_str(&format!(
+                    "{time},{},{},{},{},{},{},{},{price}\n",
+                    quote(&row["where"]),
+                    quote(&row["model"]),
+                    quote(&row["purpose"]),
+                    row["input"],
+                    row["output"],
+                    row["cacheRead"],
+                    row["cacheWrite"]
+                ));
+            }
+            return Ok(json!({"csv":text,"total":total,"truncated":total > rows.len() as i64}));
+        }
+        // Allowance steps in the page's span: each reading that moved up from the one before it.
+        let span = (
+            rows.last()
+                .and_then(|row| row["at"].as_i64())
+                .unwrap_or(from),
+            rows.first()
+                .and_then(|row| row["at"].as_i64())
+                .unwrap_or(now as i64),
+        );
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT window,observed_at,used_percent,previous FROM (SELECT window,observed_at,used_percent,
+                LAG(used_percent) OVER (PARTITION BY window ORDER BY observed_at) AS previous FROM limit_readings WHERE account=?1 AND observed_at>=?2-86400 AND observed_at<=?3)
+                WHERE observed_at>=?2 AND previous IS NOT NULL AND used_percent>previous ORDER BY observed_at DESC LIMIT 500",
+            )
+            .map_err(error)?;
+        let steps = query
+            .query_map(params![account, span.0, span.1 + 600], |row| {
+                Ok(json!({"window":row.get::<_, String>(0)?,"at":row.get::<_, i64>(1)?,"used":row.get::<_, f64>(2)?,"previous":row.get::<_, f64>(3)?}))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let choices = |column: &str| -> Result<Vec<String>, String> {
+            let mut query = self
+                .0
+                .prepare(&format!(
+                    "SELECT DISTINCT {column} AS value FROM usage_events WHERE account=?1 AND occurred_at>=?2 AND occurred_at<?3 ORDER BY value"
+                ))
+                .map_err(error)?;
+            let values = query
+                .query_map(params![account, from, to], |row| row.get::<_, String>(0))
+                .map_err(error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(error)?;
+            Ok(values)
+        };
+        Ok(
+            json!({"rows":rows,"steps":steps,"total":total,"page":filter.page,"pageSize":PAGE,
+            "choices":{"where":choices(WHERE)?,"model":choices("COALESCE(model,'')")?,"purpose":choices("COALESCE(query_source,'')")?}}),
+        )
     }
 
     /// The saved Allowance vs tokens range, 28 days unless 7 or 90 was chosen.
@@ -824,7 +1076,7 @@ pub fn insert_usage(
     request: &crate::usage::Request,
 ) -> Result<(), String> {
     db.execute(
-        "INSERT INTO usage_events VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        "INSERT INTO usage_events (account,source,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
         ON CONFLICT(account,key) DO UPDATE SET source=excluded.source,occurred_at=excluded.occurred_at,surface=excluded.surface,
         model=excluded.model,effort=excluded.effort,speed=excluded.speed,query_source=excluded.query_source,agent=excluded.agent,
         input=excluded.input,output=excluded.output,cache_read=excluded.cache_read,cache_write=excluded.cache_write,
@@ -1268,6 +1520,101 @@ mod tests {
     }
 
     #[test]
+    fn usage_list_filters_pages_and_shows_allowance_steps() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let now = 1_800_000_000_u64;
+        let at = now as i64 - 3600;
+        for index in 0..150 {
+            let request = crate::usage::Request {
+                surface: if index % 2 == 0 { "cli" } else { "desktop" }.into(),
+                model: Some("claude-opus-5-5".into()),
+                query_source: Some("main".into()),
+                input: index,
+                ..Default::default()
+            };
+            insert_usage(
+                &store.0,
+                "claude:one",
+                "otel",
+                &format!("r{index}"),
+                at + index,
+                &request,
+            )
+            .unwrap();
+        }
+        store
+            .save(&json!({"accountId":"claude:one","observedAt":at,"windows":[{"id":"seven_day","usedPercent":40.0,"remainingPercent":60.0,"resetsAt":now+9000}]}))
+            .unwrap();
+        store
+            .save(&json!({"accountId":"claude:one","observedAt":at+100,"windows":[{"id":"seven_day","usedPercent":41.0,"remainingPercent":59.0,"resetsAt":now+9000}]}))
+            .unwrap();
+        let list =
+            |filter: UsageFilter| store.usage_list("claude:one", &filter, now, false).unwrap();
+        let all = list(UsageFilter {
+            days: 7,
+            ..Default::default()
+        });
+        assert_eq!(all["total"], 150);
+        assert_eq!(all["rows"].as_array().unwrap().len(), 100);
+        assert_eq!(all["rows"][0]["input"], 149);
+        assert_eq!(all["choices"]["where"], json!(["cli", "desktop"]));
+        assert_eq!(all["steps"][0]["used"], 41.0);
+        let second = list(UsageFilter {
+            days: 7,
+            page: 1,
+            ..Default::default()
+        });
+        assert_eq!(second["rows"].as_array().unwrap().len(), 50);
+        let cli = list(UsageFilter {
+            days: 7,
+            place: "cli".into(),
+            ..Default::default()
+        });
+        assert_eq!(cli["total"], 75);
+        let day = time::OffsetDateTime::from_unix_timestamp(at)
+            .unwrap()
+            .date()
+            .to_string();
+        assert_eq!(
+            list(UsageFilter {
+                date: day,
+                ..Default::default()
+            })["total"],
+            150
+        );
+        assert!(store
+            .usage_list(
+                "claude:one",
+                &UsageFilter {
+                    date: "nope".into(),
+                    ..Default::default()
+                },
+                now,
+                false
+            )
+            .is_err());
+        let csv = store
+            .usage_list(
+                "claude:one",
+                &UsageFilter {
+                    days: 7,
+                    ..Default::default()
+                },
+                now,
+                true,
+            )
+            .unwrap();
+        let text = csv["csv"].as_str().unwrap();
+        assert_eq!(text.lines().count(), 151);
+        assert!(text
+            .lines()
+            .nth(2)
+            .unwrap()
+            .contains(",\"cli\",\"claude-opus-5-5\",\"main\",148,"));
+    }
+
+    #[test]
     fn ledger_range_is_saved_and_limited_to_offered_choices() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("usage.sqlite");
@@ -1340,6 +1687,36 @@ mod tests {
             .collect();
         surfaces.sort();
         assert_eq!(surfaces, ["cli", "cloud", "other:cli"]);
+
+        // Once the sending computer announces itself, its usage carries its name.
+        store
+            .relay_details(
+                &[("claude:one".into(), "mac".into(), "o".repeat(43))],
+                &[crate::usage_relay::Announced {
+                    origin: "o".repeat(43),
+                    name: "Studio Mac".into(),
+                    details: "m-dash 0.6.0;logs=1;feed=1".into(),
+                    at: now as i64,
+                }],
+            )
+            .unwrap();
+        let ledger = store
+            .consistency(
+                crate::burn::Provider::Claude,
+                &json!({"accountId":"claude:one","windows":[]}),
+                now,
+                28,
+            )
+            .unwrap();
+        assert!(ledger["surfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["surface"] == "other:cli@Studio Mac"));
+        let computers = store.computers().unwrap();
+        assert_eq!(computers["others"][0]["name"], "Studio Mac");
+        assert_eq!(computers["others"][0]["lastUsage"], now as i64);
+        assert_eq!(computers["cloudLastUsage"], now as i64);
     }
 
     #[test]

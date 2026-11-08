@@ -152,6 +152,13 @@ dialog[aria-label="Read-only mobile sync"] button { margin: 6px; padding: 10px; 
 .ledger table { margin-top: 10px; }
 .ledger-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .ledger-range { display: flex; gap: 10px; }
+.ledger-chart .bar-cell, tr.clickable { cursor: pointer; }
+tr.clickable:hover td, tr.clickable:focus td { background: var(--cnd-surface-raised); }
+.usage-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; font-size: 12px; margin: 12px 0; }
+.usage-filters label { display: flex; flex-direction: column; gap: 4px; }
+.usage-filters select, .usage-filters input { font: inherit; color: var(--cnd-fg); background: var(--cnd-surface-raised); border: 1px solid var(--cnd-line-input); border-radius: 5px; padding: 6px 8px; max-width: 240px; }
+.usage-pager { display: flex; gap: 16px; align-items: center; font-size: 12px; margin: 8px 0; }
+.usage-step td { color: var(--cnd-fg-muted); font-size: 12px; }
 .bar-cell.marked { box-shadow: inset 0 2px 0 var(--cnd-fg-muted); }
 .ledger-marks { list-style: none; padding: 0; margin: 0 0 10px; font-size: 13px; }
 .ledger-marks li { padding: 4px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
@@ -160,7 +167,7 @@ dialog[aria-label="Read-only mobile sync"] button { margin: 6px; padding: 10px; 
 .ledger-mark-form label { display: flex; flex-direction: column; gap: 4px; }
 .ledger-mark-form label.grow { flex: 1 1 220px; }
 .ledger-mark-form label.check { flex-direction: row; align-items: center; }
-.ledger-mark-form input[type="date"], .ledger-mark-form input[type="text"] { font: inherit; color: var(--cnd-fg); background: var(--cnd-surface-raised); border: 1px solid var(--cnd-line-input); border-radius: 5px; padding: 6px 8px; }
+.ledger-mark-form input[type="date"], .ledger-mark-form input[type="text"], #device-name { font: inherit; color: var(--cnd-fg); background: var(--cnd-surface-raised); border: 1px solid var(--cnd-line-input); border-radius: 5px; padding: 6px 8px; }
 .ledger-range .active { color: var(--cnd-fg); font-weight: 600; text-decoration: underline; }
 .code-block { width: 100%; box-sizing: border-box; font-family: var(--cnd-font-mono); font-size: 11px; color: var(--cnd-fg); background: var(--cnd-surface-raised); border: 1px solid var(--cnd-line-input); border-radius: 5px; padding: 8px; resize: none; }
 .settings-panel input[type="url"], .settings-panel input[type="password"] { font: inherit; color: var(--cnd-fg); background: var(--cnd-surface-raised); border: 1px solid var(--cnd-line-input); border-radius: 5px; padding: 7px 9px; min-width: 280px; }

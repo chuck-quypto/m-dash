@@ -101,6 +101,10 @@ Choose **On · turn off** to stop future pings. An already submitted request may
 
 **Allowance vs tokens** compares how far each Codex and Claude allowance moved over the last 7, 28 or 90 days (pick the range at the top of the page) with the tokens m-dash observed. Without a usage channel that is this computer only; with one it also includes your other computers and Claude cloud sessions. Usage m-dash can't see, such as chat and mobile apps, Codex cloud tasks or computers not on the channel, shows as *unattributed*. A note appears when the points-per-token rate shifts; a plan change, a provider change or more usage elsewhere can all cause one. Under **Plan changes and notes**, m-dash lists the plan changes it saw, and you can add ones it can't see (for example a move between two price tiers that report the same plan name) or plain notes. Each plan period gets its own rate. Turn on **Local session logs** in Settings for per-request detail. To count Claude Code cloud sessions and your other computers, follow [Cloud sessions and other computers](CLOUD_USAGE.md), which walks through deploying your own relay and setting up the cloud environment.
 
+## Usage log
+
+**Usage log** lists every request m-dash recorded for the Codex or Claude account, newest first, with the allowance steps of the same time shown between them. Filter by range or a single day, where it ran, model and purpose, or open it from a day on the Allowance vs tokens chart or a row of Observed usage. **Copy CSV** copies the filtered rows. Rows hold only accounting fields (time, model, token counts, price), never prompts or replies, and are kept 90 days.
+
 ## Android companion (experimental)
 
 Android and mobile sync are experimental and outside this desktop release. A fresh install has no configured relay or enrollment credential. No managed relay or Android download is promised. Developers can review [relay setup boundaries](../relay/README.md) and the [protocol](development/SYNC_PROTOCOL.md).

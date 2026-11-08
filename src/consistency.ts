@@ -25,19 +25,23 @@ const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumF
 const usd = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
 const percent = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 0 });
 const surfaceNames: Record<string, string> = { cli: 'Terminal', desktop: 'Desktop app', cloud: 'Cloud session', codex: 'Codex CLI' };
-// Rows shared by your other computers arrive as "other:<surface>".
-const surfaceName = (surface: string) => surface.startsWith('other:') ? `Other computer · ${surfaceNames[surface.slice(6)] ?? surface.slice(6)}` : surfaceNames[surface] ?? surface;
+// Rows shared by your other computers arrive as "other:<surface>", or "other:<surface>@<name>" once that computer has announced its name.
+export function surfaceName(surface: string) {
+  if (!surface.startsWith('other:')) return surfaceNames[surface] ?? surface;
+  const [where, ...name] = surface.slice(6).split('@');
+  return `${name.length ? name.join('@') : 'Other computer'} · ${surfaceNames[where] ?? where}`;
+}
 const shared = (surface: string) => surface === 'cloud' || surface.startsWith('other:');
 
 const markDate = (mark: LedgerMark) => new Date(mark.at * 1000).toISOString().slice(0, 10);
 const dayNumber = (date: string) => Date.parse(`${date}T00:00:00Z`) / 86_400_000;
 
-function dayBars(window: LedgerWindow, marks: LedgerMark[]) {
+function dayBars(provider: 'codex' | 'claude', window: LedgerWindow, marks: LedgerMark[]) {
   const days = window.days;
   const marked = new Map<string, string[]>();
   for (const mark of marks) marked.set(markDate(mark), [...(marked.get(markDate(mark)) ?? []), mark.text]);
   const max = Math.max(...days.map(day => day.points), 1);
-  return `<div class="chart ledger-chart" role="img" aria-label="${escape(window.label)}: allowance points per day, explained and unattributed. Exact values are in the copied CSV.">${days.map(day => `<div class="bar-cell${marked.has(day.date) ? ' marked' : ''}" title="${escape(day.date)}: ${number.format(day.points)} points, ${number.format(day.explained)} explained, ${number.format(day.unattributed)} unattributed${marked.has(day.date) ? ` · ${escape(marked.get(day.date)!.join(' · '))}` : ''}"><div class="ledger-stack" style="height:${Math.max(2, day.points / max * 100)}%"><div class="ledger-unattributed" style="flex:${day.unattributed}"></div><div class="ledger-explained" style="flex:${day.explained}"></div></div></div>`).join('')}</div>
+  return `<div class="chart ledger-chart" role="img" aria-label="${escape(window.label)}: allowance points per day, explained and unattributed. Exact values are in the copied CSV.">${days.map(day => `<div class="bar-cell${marked.has(day.date) ? ' marked' : ''}" role="button" tabindex="0" data-usage-provider="${provider}" data-usage-day="${escape(day.date)}" title="Open this day in the usage log. "${escape(day.date)}: ${number.format(day.points)} points, ${number.format(day.explained)} explained, ${number.format(day.unattributed)} unattributed${marked.has(day.date) ? ` · ${escape(marked.get(day.date)!.join(' · '))}` : ''}"><div class="ledger-stack" style="height:${Math.max(2, day.points / max * 100)}%"><div class="ledger-unattributed" style="flex:${day.unattributed}"></div><div class="ledger-explained" style="flex:${day.explained}"></div></div></div>`).join('')}</div>
     <div class="chart-axis"><span>${escape(days[0]?.date ?? '')}</span><span>${escape(days.at(-1)?.date ?? '')}</span></div>`;
 }
 
@@ -80,7 +84,7 @@ function windowCard(provider: 'codex' | 'claude', window: LedgerWindow, marks: L
   const cause = near.length ? ` That lines up with ${near.map(mark => `<strong>${escape(mark.text)}</strong> (${escape(markDate(mark))})`).join(' and ')}.` : ' A plan change, a provider change or more usage elsewhere can all cause this. If you changed plans, add it under <strong>Plan changes and notes</strong>.';
   const change = shift ? `<p class="${near.length ? 'support' : 'warning-text'}">Around ${escape(shift.date)}, each point started matching ${shift.factor > 1 ? `about ${number.format(shift.factor)}× fewer` : `about ${number.format(1 / shift.factor)}× more`} observed tokens${after ? ` (${after} day${after === 1 ? '' : 's'} of data since)` : ''}.${cause}</p>` : '';
   return `<div class="ledger-window"><h3>${escape(window.label)}</h3>
-    ${window.enough ? `<p><strong>${number.format(window.points)}</strong> points used · <strong>${number.format(window.explained)}</strong> explained by observed usage · <strong class="${share >= 0.25 ? 'warning-text' : ''}">${number.format(window.unattributed)}</strong> unattributed (${percent.format(share)})</p><p class="support">${rate}</p>${change}${dayBars(window, marks)}`
+    ${window.enough ? `<p><strong>${number.format(window.points)}</strong> points used · <strong>${number.format(window.explained)}</strong> explained by observed usage · <strong class="${share >= 0.25 ? 'warning-text' : ''}">${number.format(window.unattributed)}</strong> unattributed (${percent.format(share)})</p><p class="support">${rate}</p>${change}${dayBars(provider, window, marks)}`
       : `<p class="empty">Needs three days with both allowance movement and local usage. ${window.activeDays} so far.</p>`}
     ${window.idlePoints > 0 ? `<p class="support">${number.format(window.idlePoints)} points moved while m-dash saw no usage.</p>${idleHours(window.idleSteps)}` : ''}</div>`;
 }
@@ -93,13 +97,13 @@ function apiPrice(row: LedgerSurface) {
   return usd.format(row.costUsd);
 }
 
-function surfaces(ledger: Ledger) {
+function surfaces(provider: 'codex' | 'claude', ledger: Ledger) {
   const sorted = [...ledger.surfaces].sort((a, b) => (b.input + b.output + b.cacheRead + b.cacheWrite) - (a.input + a.output + a.cacheRead + a.cacheWrite));
   // The 12 largest groups, plus every group from a cloud session or another computer, which can be small beside local use but is the point of the relay.
   const rows = [...sorted.slice(0, 12), ...sorted.slice(12).filter(row => shared(row.surface))];
   if (!rows.length) return '';
   const showCost = rows.some(row => row.costUsd > 0);
-  return `<table><caption class="sr-only">Observed usage by where it ran, purpose and model</caption><thead><tr><th scope="col">Where</th><th scope="col">Purpose</th><th scope="col">Model</th><th scope="col" class="numeric">Requests</th><th scope="col" class="numeric">Input</th><th scope="col" class="numeric">Output</th><th scope="col" class="numeric">Cache read</th><th scope="col" class="numeric">Cache write</th>${showCost ? '<th scope="col" class="numeric">API price</th>' : ''}</tr></thead><tbody>${rows.map(row => `<tr><td>${escape(surfaceName(row.surface))}</td><td>${escape(row.querySource || '—')}</td><td>${escape(row.model || '—')}</td><td class="numeric">${compact.format(row.requests)}</td><td class="numeric">${compact.format(row.input)}</td><td class="numeric">${compact.format(row.output)}</td><td class="numeric">${compact.format(row.cacheRead)}</td><td class="numeric">${compact.format(row.cacheWrite)}</td>${showCost ? `<td class="numeric">${apiPrice(row)}</td>` : ''}</tr>`).join('')}</tbody></table>`;
+  return `<table><caption class="sr-only">Observed usage by where it ran, purpose and model</caption><thead><tr><th scope="col">Where</th><th scope="col">Purpose</th><th scope="col">Model</th><th scope="col" class="numeric">Requests</th><th scope="col" class="numeric">Input</th><th scope="col" class="numeric">Output</th><th scope="col" class="numeric">Cache read</th><th scope="col" class="numeric">Cache write</th>${showCost ? '<th scope="col" class="numeric">API price</th>' : ''}</tr></thead><tbody>${rows.map(row => `<tr class="clickable" tabindex="0" data-usage-provider="${provider}" data-usage-where="${escape(row.surface)}" data-usage-purpose="${escape(row.querySource)}" data-usage-model="${escape(row.model)}" title="Open these requests in the usage log"><td>${escape(surfaceName(row.surface))}</td><td>${escape(row.querySource || '—')}</td><td>${escape(row.model || '—')}</td><td class="numeric">${compact.format(row.requests)}</td><td class="numeric">${compact.format(row.input)}</td><td class="numeric">${compact.format(row.output)}</td><td class="numeric">${compact.format(row.cacheRead)}</td><td class="numeric">${compact.format(row.cacheWrite)}</td>${showCost ? `<td class="numeric">${apiPrice(row)}</td>` : ''}</tr>`).join('')}</tbody></table>`;
 }
 
 function serverVsLocal(ledger: Ledger) {
@@ -148,13 +152,38 @@ function observedFrom(ledgers: Ledgers) {
   return 'this computer';
 }
 
-export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28) {
+export interface Computers { name?: string; cloudLastUsage?: number | null; others?: { name: string | null; details: string | null; announcedAt: number | null; lastUsage: number | null }[] }
+
+const ago = (seconds: number | null | undefined) => {
+  if (seconds == null) return 'never';
+  const hours = (Date.now() / 1000 - seconds) / 3600;
+  return hours < 1 ? 'within the hour' : hours < 48 ? `${Math.round(hours)}h ago` : `${Math.round(hours / 24)} days ago`;
+};
+const onOff = (value: boolean | null) => value == null ? '<span class="support">unknown</span>' : value ? 'On' : '<span class="warning-text">Off</span>';
+const flag = (details: string | null, name: string) => { const match = new RegExp(`(?:^|;)${name}=(\\d)`).exec(details ?? ''); return match ? match[1] === '1' : null; };
+
+// Where the ledger's observed usage comes from, what each computer contributes and what stays invisible.
+function computersPanel(computers: Computers, channel: boolean, localLogs: boolean, claudeFeed: boolean, claude: boolean) {
+  const others = computers.others ?? [];
+  const stale = (row: { lastUsage: number | null; announcedAt: number | null }) => Math.max(row.lastUsage ?? 0, row.announcedAt ?? 0) < Date.now() / 1000 - 3 * 86_400;
+  const rows = [`<tr><td><input type="text" id="device-name" maxlength="64" value="${escape(computers.name ?? '')}" aria-label="This computer's name"> <button class="text-button" id="device-name-save">Rename</button><br><span class="support">This computer</span></td><td>Now</td><td>${onOff(localLogs)}</td><td>${claude ? onOff(claudeFeed) : '—'}</td><td></td></tr>`,
+    ...others.map(row => `<tr><td>${escape(row.name ?? 'Unnamed computer')}${row.name ? '' : '<br><span class="support">Update m-dash there to see its name</span>'}</td><td class="${stale(row) ? 'warning-text' : ''}">${ago(row.lastUsage)}</td><td>${onOff(flag(row.details, 'logs'))}</td><td>${claude ? onOff(flag(row.details, 'feed')) : '—'}</td><td class="support">${escape((row.details ?? '').split(';')[0])}</td></tr>`)];
+  const cloud = claude ? `<p class="support">Claude cloud sessions: last usage ${ago(computers.cloudLastUsage)}.${computers.cloudLastUsage == null ? ' If you use them, add the setup script from Settings to each cloud environment.' : ''}</p>` : '';
+  return `<section class="panel"><h2>Computers and coverage</h2>
+    ${channel ? '<p class="support">These computers share usage over your usage channel. Turn on <strong>Local session logs</strong> on each one so usage from while m-dash was closed is counted too. A computer whose last usage is more than three days old is shown in amber.</p>' : '<p class="support">Only this computer is counted. To include your other computers and Claude cloud sessions, set up <strong>Cloud sessions and other computers</strong> in Settings.</p>'}
+    <table><caption class="sr-only">Computers reporting usage</caption><thead><tr><th scope="col">Computer</th><th scope="col">Last usage</th><th scope="col">Local session logs</th><th scope="col">Claude feed</th><th scope="col">Version</th></tr></thead><tbody>${rows.join('')}</tbody></table>
+    ${channel ? cloud : ''}
+    <p class="support">m-dash can't see chat and mobile apps, Claude Cowork and Duet, ChatGPT Dots, Codex cloud tasks or code review. Their use counts toward the same allowances and shows as unattributed.</p></section>`;
+}
+
+export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28, computers: Computers = {}, channel = false) {
   const providers = (['codex', 'claude'] as const).filter(provider => enabled[provider]);
   const intro = `<p class="support">Compares how far each allowance moved over the last ${days} days with the tokens m-dash observed on ${observedFrom(ledgers)}. Token types are weighted by the provider's published prices, Claude models by their API price (an Opus token counts more than a Haiku token), and the baseline rate comes from your most efficient days, learned separately before and after each plan change. Anything above it is <strong>unattributed</strong>: usage m-dash did not see, such as chat and mobile apps, background agents such as Claude Duet, tasks started by ChatGPT Dots, Codex cloud tasks, or computers and cloud sessions not on your usage channel. A plan or provider change shows as a rate shift.</p>
     ${localLogs ? '' : '<p class="warning-text">Turn on <strong>Local session logs</strong> in Settings for Codex token detail and Claude sessions run while m-dash was closed.</p>'}
     ${enabled.claude && !claudeFeed ? '<p class="warning-text">Enable the Claude local feed in Settings for cost, cloud-session and subagent detail.</p>' : ''}`;
   if (!providers.length) return `<section class="panel"><h2>Allowance vs tokens</h2>${intro}<p class="empty">Enable Codex or Claude in Settings.</p></section>`;
   return `<section class="panel"><div class="section-heading"><h2>Allowance vs tokens</h2><div class="ledger-actions">${rangePicker(days)}<button id="copy-ledger" class="text-button">Copy daily CSV</button></div></div>${intro}</section>
+    ${computersPanel(computers, channel, localLogs, claudeFeed, enabled.claude)}
     ${providers.map(provider => {
       const ledger = ledgers[provider];
       const name = provider === 'codex' ? 'Codex' : 'Claude';
@@ -164,7 +193,7 @@ export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; cla
         ${ledger.cacheReadShare != null ? `<p class="support">Cache reads were ${percent.format(ledger.cacheReadShare)} of prompt tokens. A sudden drop usually means repeated context was billed as fresh input.</p>` : ''}
         ${ledger.limitHits ? `<p class="warning-text">${ledger.limitHits} request${ledger.limitHits === 1 ? ' was' : 's were'} refused for a reached limit.</p>` : ''}
         ${provider === 'codex' ? serverVsLocal(ledger) : ''}
-        ${ledger.surfaces.length ? `<h3>Observed usage</h3>${surfaces(ledger)}` : '<p class="empty">No per-request usage has been recorded yet.</p>'}
+        ${ledger.surfaces.length ? `<h3>Observed usage</h3>${surfaces(provider, ledger)}` : '<p class="empty">No per-request usage has been recorded yet.</p>'}
         ${notes(provider, ledger)}</section>`;
     }).join('')}`;
 }
