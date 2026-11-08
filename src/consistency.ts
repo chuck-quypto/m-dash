@@ -23,6 +23,9 @@ const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumF
 const usd = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
 const percent = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 0 });
 const surfaceNames: Record<string, string> = { cli: 'Terminal', desktop: 'Desktop app', cloud: 'Cloud session', codex: 'Codex CLI' };
+// Rows shared by your other computers arrive as "other:<surface>".
+const surfaceName = (surface: string) => surface.startsWith('other:') ? `Other computer · ${surfaceNames[surface.slice(6)] ?? surface.slice(6)}` : surfaceNames[surface] ?? surface;
+const shared = (surface: string) => surface === 'cloud' || surface.startsWith('other:');
 
 function dayBars(window: LedgerWindow) {
   const days = window.days.slice(-28);
@@ -63,11 +66,11 @@ function apiPrice(row: LedgerSurface) {
 
 function surfaces(ledger: Ledger) {
   const sorted = [...ledger.surfaces].sort((a, b) => (b.input + b.output + b.cacheRead + b.cacheWrite) - (a.input + a.output + a.cacheRead + a.cacheWrite));
-  // The 12 largest groups, plus every cloud-session group, which is small beside local use but is the point of the relay.
-  const rows = [...sorted.slice(0, 12), ...sorted.slice(12).filter(row => row.surface === 'cloud')];
+  // The 12 largest groups, plus every group from a cloud session or another computer, which can be small beside local use but is the point of the relay.
+  const rows = [...sorted.slice(0, 12), ...sorted.slice(12).filter(row => shared(row.surface))];
   if (!rows.length) return '';
   const showCost = rows.some(row => row.costUsd > 0);
-  return `<table><caption class="sr-only">Observed usage by where it ran, purpose and model</caption><thead><tr><th scope="col">Where</th><th scope="col">Purpose</th><th scope="col">Model</th><th scope="col" class="numeric">Requests</th><th scope="col" class="numeric">Input</th><th scope="col" class="numeric">Output</th><th scope="col" class="numeric">Cache read</th><th scope="col" class="numeric">Cache write</th>${showCost ? '<th scope="col" class="numeric">API price</th>' : ''}</tr></thead><tbody>${rows.map(row => `<tr><td>${escape(surfaceNames[row.surface] ?? row.surface)}</td><td>${escape(row.querySource || '—')}</td><td>${escape(row.model || '—')}</td><td class="numeric">${compact.format(row.requests)}</td><td class="numeric">${compact.format(row.input)}</td><td class="numeric">${compact.format(row.output)}</td><td class="numeric">${compact.format(row.cacheRead)}</td><td class="numeric">${compact.format(row.cacheWrite)}</td>${showCost ? `<td class="numeric">${apiPrice(row)}</td>` : ''}</tr>`).join('')}</tbody></table>`;
+  return `<table><caption class="sr-only">Observed usage by where it ran, purpose and model</caption><thead><tr><th scope="col">Where</th><th scope="col">Purpose</th><th scope="col">Model</th><th scope="col" class="numeric">Requests</th><th scope="col" class="numeric">Input</th><th scope="col" class="numeric">Output</th><th scope="col" class="numeric">Cache read</th><th scope="col" class="numeric">Cache write</th>${showCost ? '<th scope="col" class="numeric">API price</th>' : ''}</tr></thead><tbody>${rows.map(row => `<tr><td>${escape(surfaceName(row.surface))}</td><td>${escape(row.querySource || '—')}</td><td>${escape(row.model || '—')}</td><td class="numeric">${compact.format(row.requests)}</td><td class="numeric">${compact.format(row.input)}</td><td class="numeric">${compact.format(row.output)}</td><td class="numeric">${compact.format(row.cacheRead)}</td><td class="numeric">${compact.format(row.cacheWrite)}</td>${showCost ? `<td class="numeric">${apiPrice(row)}</td>` : ''}</tr>`).join('')}</tbody></table>`;
 }
 
 function serverVsLocal(ledger: Ledger) {

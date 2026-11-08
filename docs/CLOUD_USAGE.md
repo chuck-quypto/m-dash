@@ -201,7 +201,8 @@ running don't change.
 2. In m-dash, click **Refresh accounts**, which syncs the relay right away.
 3. Open **Allowance vs tokens → Claude → Observed usage**. A row with
    **Where = Cloud session** means everything works. That row is always listed,
-   however small.
+   however small. Usage from your other computers shows as
+   **Other computer · Terminal** (or **· Desktop app**), and is always listed too.
 
 If no row appears after a refresh:
 

@@ -16,6 +16,10 @@ Notable changes to the m-dash desktop app. The format follows
   public HTTPS relay address (still no path, port, IP address or localhost), and
   the guide lists the relay's contract for hosting it elsewhere. A relay is never
   needed for normal use.
+- Usage shared by your other computers is labeled **Other computer** in the
+  **Where** column of Observed usage, such as "Other computer · Terminal", and
+  is always listed, like cloud sessions. Before, it was merged into this
+  computer's rows.
 
 ### Fixed
 - The **API price** column on Allowance vs tokens shows "—" for usage whose
