@@ -72,14 +72,31 @@ impl Channel {
         channel.validate()
     }
 
-    /// Environment variables for a Claude Code cloud environment to export its usage here.
-    pub fn cloud_environment(&self) -> String {
-        format!(
-            "CLAUDE_CODE_ENABLE_TELEMETRY=1\nOTEL_LOGS_EXPORTER=otlp\nOTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json\nOTEL_EXPORTER_OTLP_LOGS_ENDPOINT={}/v1/usage/{}/{}/logs",
-            self.endpoint, self.id, self.ingest
+    /// A setup script for a Claude Code cloud environment that makes its sessions export usage
+    /// here. Cloud environments drop `OTEL_*` variables, so the script writes the exporter
+    /// settings into Claude Code's user settings before the session starts instead.
+    pub fn cloud_setup_script(&self) -> String {
+        CLOUD_SETUP.replace(
+            "@ENDPOINT@",
+            &format!(
+                "{}/v1/usage/{}/{}/logs",
+                self.endpoint, self.id, self.ingest
+            ),
         )
     }
 }
+
+const CLOUD_SETUP: &str = r#"# m-dash: send Claude Code usage from cloud sessions to your relay.
+MDASH_ENDPOINT='@ENDPOINT@'
+mkdir -p "$HOME/.claude"
+MDASH_ENDPOINT="$MDASH_ENDPOINT" node -e '
+const fs = require("fs"), path = require("path").join(process.env.HOME, ".claude", "settings.json");
+let settings = {}; try { settings = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
+settings.env = { ...settings.env, CLAUDE_CODE_ENABLE_TELEMETRY: "1", OTEL_LOGS_EXPORTER: "otlp",
+  OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json", OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: process.env.MDASH_ENDPOINT };
+fs.writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
+'
+"#;
 
 #[cfg(windows)]
 pub fn load() -> Result<Option<Channel>> {
@@ -149,7 +166,7 @@ fn save(_: Option<&Channel>) -> Result<()> {
 fn status(channel: Option<Channel>) -> Value {
     match channel {
         Some(channel) => {
-            json!({"endpoint":channel.endpoint,"cloudEnvironment":channel.cloud_environment(),"code":channel.code()})
+            json!({"endpoint":channel.endpoint,"cloudSetup":channel.cloud_setup_script(),"code":channel.code()})
         }
         None => Value::Null,
     }
@@ -363,11 +380,15 @@ mod tests {
         let mut same = channel();
         same.read = same.ingest.clone();
         assert!(Channel::from_code(&same.code()).is_err());
-        assert!(channel().cloud_environment().ends_with(&format!(
-            "/v1/usage/{}/{}/logs",
+        let script = channel().cloud_setup_script();
+        assert!(script.contains(&format!(
+            "MDASH_ENDPOINT='{}/v1/usage/{}/{}/logs'",
+            channel().endpoint,
             "i".repeat(43),
             "w".repeat(43)
         )));
+        assert!(!script.contains('@'));
+        assert!(script.contains("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: process.env.MDASH_ENDPOINT"));
     }
 
     #[test]

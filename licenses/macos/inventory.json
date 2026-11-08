@@ -1,6 +1,6 @@
 {
   "target": "aarch64-apple-darwin",
-  "cargoLockSha256": "2f72da2a2516f903abb38c30d1d00c013e5d302212a9e4583bc1c910c2dbc763",
+  "cargoLockSha256": "78ae8904b04c880a2b12df3a9f151ef8e72298b5120f71313d6dbbd78ad1fac2",
   "packages": [
     {
       "name": "adler2",
