@@ -497,7 +497,7 @@ impl Store {
             .into_iter()
             .filter(|reading| labels.contains_key(&reading.window))
             .collect::<Vec<_>>();
-        let mut query = self.0.prepare("SELECT occurred_at,surface,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
+        let mut query = self.0.prepare("SELECT occurred_at,CASE WHEN source='relay' AND surface!='cloud' THEN 'other:'||surface ELSE surface END,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
         let usage = query
             .query_map(params![account, since], |row| {
                 Ok(crate::burn::Usage {
@@ -1087,6 +1087,69 @@ mod tests {
         );
         assert_eq!(store.unshared_usage("other", 10).unwrap().1.len(), 3);
         assert_eq!(store.relay_cursor("other").unwrap(), 0);
+    }
+
+    #[test]
+    fn ledger_marks_usage_shared_by_other_computers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let now = crate::collector::now();
+        let request = |surface: &str| crate::usage::Request {
+            surface: surface.into(),
+            input: 1,
+            ..Default::default()
+        };
+        insert_usage(
+            &store.0,
+            "claude:one",
+            "otel",
+            "here",
+            now as i64,
+            &request("cli"),
+        )
+        .unwrap();
+        store
+            .ingest_relay(
+                "chan",
+                &[
+                    (
+                        1,
+                        (
+                            "claude:one".into(),
+                            "mac".into(),
+                            now as i64,
+                            request("cli"),
+                        ),
+                    ),
+                    (
+                        2,
+                        (
+                            "claude:one".into(),
+                            "web".into(),
+                            now as i64,
+                            request("cloud"),
+                        ),
+                    ),
+                ],
+                2,
+            )
+            .unwrap();
+        let ledger = store
+            .consistency(
+                crate::burn::Provider::Claude,
+                &json!({"accountId":"claude:one","windows":[]}),
+                now,
+                28,
+            )
+            .unwrap();
+        let mut surfaces: Vec<_> = ledger["surfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["surface"].as_str().unwrap().to_owned())
+            .collect();
+        surfaces.sort();
+        assert_eq!(surfaces, ["cli", "cloud", "other:cli"]);
     }
 
     #[test]
