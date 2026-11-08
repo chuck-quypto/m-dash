@@ -240,6 +240,30 @@ fn period_rates(dates: &[&String], pairs: &[(f64, f64)], breaks: &[String]) -> V
     dates.iter().map(|date| rates[&period(date)]).collect()
 }
 
+/// How sure the current rate is: the active days in the latest plan period and the spread of
+/// their points-per-weight ratios over the efficient half the baseline is fitted on, from the
+/// most efficient day to the median day. Few days or a wide spread mean a rough estimate.
+fn spread(
+    dates: &[&String],
+    pairs: &[(f64, f64)],
+    breaks: &[String],
+) -> (usize, Option<(f64, f64)>) {
+    let latest = breaks
+        .iter()
+        .filter(|day| dates.iter().any(|date| date >= day))
+        .max();
+    let mut ratios: Vec<f64> = dates
+        .iter()
+        .zip(pairs)
+        .filter(|(date, _)| latest.is_none_or(|start| **date >= start))
+        .filter(|(_, (points, weight))| *weight >= MIN_WEIGHTED && *points > 0.0)
+        .map(|(_, (points, weight))| points / weight)
+        .collect();
+    ratios.sort_by(f64::total_cmp);
+    let range = (ratios.len() >= MIN_DAYS).then(|| (ratios[0], ratios[(ratios.len() - 1) / 2]));
+    (ratios.len(), range)
+}
+
 /// Analyses one account's allowance windows against its observed usage. `breaks` are the times
 /// the plan changed; each plan period gets its own baseline rate.
 pub fn analyze(
@@ -288,6 +312,7 @@ pub fn analyze(
         let pairs: Vec<(f64, f64)> = days.values().map(|day| (day.0, day.1)).collect();
         let rate = baseline(&pairs);
         let rates = period_rates(&dates, &pairs, &breaks);
+        let (rate_days, rate_range) = spread(&dates, &pairs, &breaks);
         // Points per dollar only when every active day's usage reported its cost.
         let priced: Vec<(&String, (f64, f64))> = days
             .iter()
@@ -330,7 +355,8 @@ pub fn analyze(
         windows.push(json!({
             "id":id,"label":labels.get(id).cloned().unwrap_or_else(|| id.to_owned()),
             "enough":rate.is_some(),"activeDays":ratios.len(),
-            "pointsPerMillion":rate.and(rates.last().copied().flatten()).map(|rate| rate * 1e6),"pointsPerDollar":cost_rate,
+            "pointsPerMillion":rate.and(rates.last().copied().flatten()).map(|rate| rate * 1e6),
+            "rateDays":rate_days,"rateRange":rate_range.map(|(low, high)| [low * 1e6, high * 1e6]),"pointsPerDollar":cost_rate,
             "points":total.0,"explained":total.1,"unattributed":total.0 - total.1,
             "idlePoints":idle_points,"idleSteps":idle.iter().rev().take(500).collect::<Vec<_>>(),
             "change":change_point(&ratios),"days":day_rows,
@@ -578,5 +604,9 @@ mod tests {
         let split = &analyze(&[4 * DAY + 3600])["windows"][0];
         assert!(split["unattributed"].as_f64().unwrap().abs() < 1e-9);
         assert!((split["pointsPerMillion"].as_f64().unwrap() - 20.0).abs() < 1e-9);
+        assert_eq!(split["rateDays"], 4);
+        assert_eq!(split["rateRange"], json!([20.0, 20.0]));
+        assert_eq!(mixed["rateDays"], 8);
+        assert_eq!(mixed["rateRange"], json!([10.0, 10.0]));
     }
 }

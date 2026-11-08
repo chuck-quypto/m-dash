@@ -3,7 +3,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
-import { consistencyPage, ledgerCsv, type Ledgers } from './consistency';
+import { consistencyPage, ledgerCsv, remainingWorth, type Ledgers } from './consistency';
 import { alertMark, alertSentence, timeLeftSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
@@ -114,7 +114,9 @@ function alertParts(provider: string, windowId: string | null, remaining: number
   const facts = stale ? null : windowAlert(provider, windowId, remaining, resetsAt, restricted, state.forecasts);
   const sentence = facts ? alertSentence(facts, dateTime) : '';
   const left = stale || restricted ? '' : timeLeftSentence(provider, windowId, state.forecasts, Date.now() / 1000);
-  return { alert: facts?.alert ?? null, mark: alertMark(facts?.alert ?? null), left: left ? `<p class="support time-left">${escape(left)}</p>` : '', line: sentence ? `<p class="alert-line" role="status">${alertMark(facts!.alert)} ${escape(sentence)}</p>` : '' };
+  const ledger = provider === 'Codex' || provider === 'Claude' ? provider.toLowerCase() as 'codex' | 'claude' : null;
+  const worth = ledger && !restricted && !stale ? remainingWorth(state.consistency ?? {}, ledger, windowId, remaining) : '';
+  return { alert: facts?.alert ?? null, mark: alertMark(facts?.alert ?? null), left: `${left ? `<p class="support time-left">${escape(left)}</p>` : ''}${worth ? `<p class="support">${escape(worth)}</p>` : ''}`, line: sentence ? `<p class="alert-line" role="status">${alertMark(facts!.alert)} ${escape(sentence)}</p>` : '' };
 }
 function openrouterCard() {
   const snapshot = state.openrouter;

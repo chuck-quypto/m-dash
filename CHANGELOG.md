@@ -17,6 +17,11 @@ Notable changes to the m-dash desktop app. The format follows
   that report the same plan name, or plain notes. Each plan period gets its own
   baseline rate, and a rate shift near a plan change or note says so instead of
   showing a warning. Notes appear as marks on the daily chart.
+- Each learned rate on Allowance vs tokens says how far to trust it (good, fair
+  or rough estimate, from the days it rests on and how much the efficient days
+  vary). Codex and Claude allowance bars on the Overview also say what the
+  allowance left is worth at that rate, such as "≈ 4.5M weighted tokens (about
+  $56 of API-priced usage) left at your learned rate".
 
 ### Changed
 - Allowance vs tokens now says "explained by observed usage" and names where

@@ -3,7 +3,7 @@
 export interface LedgerDay { date: string; points: number; weighted: number; explained: number; unattributed: number }
 export interface LedgerWindow {
   id: string; label: string; enough: boolean; activeDays: number;
-  pointsPerMillion: number | null; pointsPerDollar: number | null;
+  pointsPerMillion: number | null; pointsPerDollar: number | null; rateDays?: number; rateRange?: [number, number] | null;
   points: number; explained: number; unattributed: number; idlePoints: number; idleSteps: number[];
   change: { date: string; factor: number; daysAfter?: number } | null; days: LedgerDay[];
 }
@@ -49,11 +49,30 @@ function idleHours(steps: number[]) {
   return `<h4>Steps with no observed usage, by hour (your time)</h4><div class="chart ledger-hours" role="img" aria-label="Allowance steps with no observed usage by hour of day">${hours.map((count, hour) => `<div class="bar-cell" title="${hour}:00: ${count} step${count === 1 ? '' : 's'}"><div class="bar" style="height:${count ? Math.max(4, count / max * 100) : 0}%"></div></div>`).join('')}</div><div class="chart-axis"><span>0:00</span><span>12:00</span><span>23:00</span></div>`;
 }
 
+// How far to trust the learned rate: the days it rests on and the spread of the efficient days.
+export function confidence(window: LedgerWindow) {
+  const days = window.rateDays ?? window.activeDays;
+  const range = window.rateRange;
+  const wide = range ? range[1] / range[0] : 1;
+  const level = days >= 14 && wide < 2 ? 'Good estimate' : days >= 7 && wide < 3 ? 'Fair estimate' : 'Rough estimate';
+  const spread = range && range[1] > range[0] * 1.05 ? `, efficient days ranged ${compact.format(1e6 / range[1])}–${compact.format(1e6 / range[0])} tokens per point` : '';
+  return `<span class="${level === 'Rough estimate' ? 'warning-text' : ''}">${level}: ${days} active day${days === 1 ? '' : 's'}${window.rateDays != null && window.rateDays < window.activeDays ? ' since the last plan change' : ''}${spread}.</span>`;
+}
+
+// What the allowance left means in tokens and, for Claude, API-priced usage, at the learned rate.
+export function remainingWorth(ledgers: Ledgers, provider: 'codex' | 'claude', windowId: string | null, remaining: number | null) {
+  const window = ledgers[provider]?.windows.find(item => item.id === windowId);
+  if (!window?.enough || !window.pointsPerMillion || remaining == null || remaining <= 0) return '';
+  const tokens = remaining / window.pointsPerMillion * 1e6;
+  const price = provider === 'claude' && window.pointsPerDollar ? ` (about ${usd.format(remaining / window.pointsPerDollar)} of API-priced usage)` : '';
+  return `≈ ${compact.format(tokens)} weighted tokens${price} left at your learned rate.`;
+}
+
 function windowCard(provider: 'codex' | 'claude', window: LedgerWindow, marks: LedgerMark[]) {
   const share = window.points > 0 ? window.unattributed / window.points : 0;
-  const rate = window.pointsPerMillion == null ? '' : provider === 'claude' && window.pointsPerDollar != null
+  const rate = window.pointsPerMillion == null ? '' : `${provider === 'claude' && window.pointsPerDollar != null
     ? `One point ≈ ${usd.format(1 / window.pointsPerDollar)} of API-priced usage (${compact.format(1e6 / window.pointsPerMillion)} weighted tokens).`
-    : `One point ≈ ${compact.format(1e6 / window.pointsPerMillion)} weighted tokens.`;
+    : `One point ≈ ${compact.format(1e6 / window.pointsPerMillion)} weighted tokens.`} ${confidence(window)}`;
   const shift = window.change;
   const after = shift?.daysAfter;
   // A plan change or note within three days of the shift is the likely explanation.
