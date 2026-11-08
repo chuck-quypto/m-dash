@@ -638,7 +638,10 @@ mod replay_tests {
         ] {
             assert!(Pair::new(url, 1000).is_err());
         }
-        for url in ["https://relay.example.com", "https://m-dash.example.azurewebsites.net"] {
+        for url in [
+            "https://relay.example.com",
+            "https://m-dash.example.azurewebsites.net",
+        ] {
             assert!(Pair::new(url, 1000).is_ok());
         }
     }
