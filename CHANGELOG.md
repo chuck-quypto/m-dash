@@ -11,6 +11,12 @@ Notable changes to the m-dash desktop app. The format follows
   for deploying your own relay, creating and joining a usage channel, and
   setting up a Claude cloud environment, with checks and how to undo it.
 
+### Changed
+- Relays no longer have to be on Cloudflare `workers.dev`. m-dash accepts any
+  public HTTPS relay address (still no path, port, IP address or localhost), and
+  the guide lists the relay's contract for hosting it elsewhere. A relay is never
+  needed for normal use.
+
 ### Fixed
 - The **API price** column on Allowance vs tokens shows "—" for usage whose
   source reports no price, such as terminal sessions read from session logs,

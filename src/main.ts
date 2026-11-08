@@ -233,7 +233,7 @@ function usageRelayPanel() {
     <textarea id="usage-relay-code" class="code-block" readonly rows="2" aria-label="Usage channel code">${escape(usageRelay.code)}</textarea><button id="copy-usage-code" class="text-button" type="button">Copy code</button>
     ${state.usageRelayError ? `<p class="warning-text">Last exchange: ${escape(state.usageRelayError)}</p>` : ''}
     <div class="connection-actions"><button id="usage-relay-leave" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Disconnect this computer</button><button id="usage-relay-delete" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Delete channel and shared rows</button></div>`
-    : `<label class="setting-mode" for="usage-relay-endpoint">Relay <input id="usage-relay-endpoint" type="url" placeholder="https://your-relay.workers.dev" value="${escape(usageRelayEndpoint)}"></label>
+    : `<label class="setting-mode" for="usage-relay-endpoint">Relay <input id="usage-relay-endpoint" type="url" placeholder="https://relay.example.com" value="${escape(usageRelayEndpoint)}"></label>
     <label class="setting-mode" for="usage-relay-enrollment">Enrollment secret <input id="usage-relay-enrollment" type="password" autocomplete="off" placeholder="Leave empty to use this computer's relay setup"></label>
     <button id="usage-relay-create" class="refresh" type="button" ${setupBusy ? 'disabled' : ''}>Create usage channel</button>
     <label class="setting-mode" for="usage-relay-join">Join a usage channel <input id="usage-relay-join" type="password" autocomplete="off" placeholder="mdash-usage1:…"></label>
