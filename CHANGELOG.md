@@ -11,6 +11,12 @@ Notable changes to the m-dash desktop app. The format follows
   for deploying your own relay, creating and joining a usage channel, and
   setting up a Claude cloud environment, with checks and how to undo it.
 - Allowance vs tokens has a **7 / 28 / 90 days** range. The choice is remembered.
+- **Plan changes and notes** on Allowance vs tokens. m-dash records when an
+  account's plan changes (and recovers the last 30 days of Codex plan history),
+  and you can add plan changes it can't see, such as moving between price tiers
+  that report the same plan name, or plain notes. Each plan period gets its own
+  baseline rate, and a rate shift near a plan change or note says so instead of
+  showing a warning. Notes appear as marks on the daily chart.
 
 ### Changed
 - Allowance vs tokens now says "explained by observed usage" and names where

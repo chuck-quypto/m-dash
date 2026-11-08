@@ -219,14 +219,38 @@ fn in_scope(window: &str, model: &str) -> bool {
     }
 }
 
-/// Analyses one account's allowance windows against its observed usage.
+/// The baseline rate for each day: from the days in its own plan period (between breaks) when
+/// that period has enough active days, otherwise from the whole range. A plan change resizes the
+/// allowance, so mixing both sides would explain too much on one and too little on the other.
+fn period_rates(dates: &[&String], pairs: &[(f64, f64)], breaks: &[String]) -> Vec<Option<f64>> {
+    let overall = baseline(pairs);
+    let period = |date: &String| breaks.iter().filter(|day| *day <= date).count();
+    let mut rates = BTreeMap::new();
+    for index in dates.iter().map(|date| period(date)) {
+        rates.entry(index).or_insert_with(|| {
+            let own: Vec<(f64, f64)> = dates
+                .iter()
+                .zip(pairs)
+                .filter(|(date, _)| period(date) == index)
+                .map(|(_, pair)| *pair)
+                .collect();
+            baseline(&own).or(overall)
+        });
+    }
+    dates.iter().map(|date| rates[&period(date)]).collect()
+}
+
+/// Analyses one account's allowance windows against its observed usage. `breaks` are the times
+/// the plan changed; each plan period gets its own baseline rate.
 pub fn analyze(
     provider: Provider,
     labels: &BTreeMap<String, String>,
     readings: &[Reading],
     usage: &[Usage],
     server_days: &BTreeMap<String, i64>,
+    breaks: &[i64],
 ) -> Value {
+    let breaks: Vec<String> = breaks.iter().map(|at| date(*at)).collect();
     let mut sorted = usage.to_vec();
     sorted.sort_by_key(|row| row.at);
     let usage = &sorted[..];
@@ -260,16 +284,24 @@ pub fn analyze(
                 day.3 = true;
             }
         }
+        let dates: Vec<&String> = days.keys().collect();
         let pairs: Vec<(f64, f64)> = days.values().map(|day| (day.0, day.1)).collect();
         let rate = baseline(&pairs);
+        let rates = period_rates(&dates, &pairs, &breaks);
         // Points per dollar only when every active day's usage reported its cost.
-        let cost_pairs: Vec<(f64, f64)> = days
-            .values()
-            .filter(|day| !day.3)
-            .map(|day| (day.0, day.2 * 1e6))
+        let priced: Vec<(&String, (f64, f64))> = days
+            .iter()
+            .filter(|(_, day)| !day.3)
+            .map(|(date, day)| (date, (day.0, day.2 * 1e6)))
             .collect();
         let cost_rate = (provider == Provider::Claude)
-            .then(|| baseline(&cost_pairs))
+            .then(|| {
+                let (dates, pairs): (Vec<&String>, Vec<(f64, f64)>) = priced.into_iter().unzip();
+                period_rates(&dates, &pairs, &breaks)
+                    .last()
+                    .copied()
+                    .flatten()
+            })
             .flatten()
             .map(|rate| rate * 1e6);
         let ratios: Vec<(String, f64)> = days
@@ -280,7 +312,8 @@ pub fn analyze(
         let mut total = (0.0, 0.0, 0.0);
         let day_rows: Vec<Value> = days
             .iter()
-            .map(|(date, day)| {
+            .zip(&rates)
+            .map(|((date, day), rate)| {
                 let explained = rate.map_or(0.0, |rate| (rate * day.1).min(day.0));
                 total.0 += day.0;
                 total.1 += explained;
@@ -297,7 +330,7 @@ pub fn analyze(
         windows.push(json!({
             "id":id,"label":labels.get(id).cloned().unwrap_or_else(|| id.to_owned()),
             "enough":rate.is_some(),"activeDays":ratios.len(),
-            "pointsPerMillion":rate.map(|rate| rate * 1e6),"pointsPerDollar":cost_rate,
+            "pointsPerMillion":rate.and(rates.last().copied().flatten()).map(|rate| rate * 1e6),"pointsPerDollar":cost_rate,
             "points":total.0,"explained":total.1,"unattributed":total.0 - total.1,
             "idlePoints":idle_points,"idleSteps":idle.iter().rev().take(500).collect::<Vec<_>>(),
             "change":change_point(&ratios),"days":day_rows,
@@ -425,6 +458,7 @@ mod tests {
             &readings,
             &usage,
             &BTreeMap::new(),
+            &[],
         );
         let window = &result["windows"][0];
         assert_eq!(window["label"], "7-day");
@@ -458,6 +492,7 @@ mod tests {
             &readings,
             &usage,
             &BTreeMap::new(),
+            &[],
         );
         let windows = result["windows"].as_array().unwrap();
         assert_eq!(windows[0]["id"], "seven_day");
@@ -494,6 +529,7 @@ mod tests {
             &readings,
             &usage,
             &BTreeMap::from([("1970-01-01".to_owned(), 900_000)]),
+            &[],
         );
         let window = &result["windows"][0];
         assert_eq!(window["points"], 16.0);
@@ -505,5 +541,42 @@ mod tests {
             result["serverVsLocal"][0],
             json!({"date":"1970-01-01","server":900_000,"local":200_000})
         );
+    }
+
+    #[test]
+    fn a_plan_change_gives_each_period_its_own_baseline() {
+        let mut readings = Vec::new();
+        let mut usage = Vec::new();
+        for day in 0..8_i64 {
+            let base = day * DAY;
+            // A smaller plan from day four: each point needs only half the tokens.
+            let tokens = if day >= 4 { 50_000 } else { 100_000 };
+            for (step, used) in [(0, 0.0), (1, 1.0), (2, 2.0)] {
+                readings.push(Reading {
+                    window: "weekly".into(),
+                    at: base + step * 600,
+                    used,
+                    resets_at: Some(base + DAY),
+                });
+                if step > 0 {
+                    usage.push(input(base + step * 600 - 1, tokens, 0));
+                }
+            }
+        }
+        let analyze = |breaks: &[i64]| {
+            analyze(
+                Provider::Codex,
+                &BTreeMap::new(),
+                &readings,
+                &usage,
+                &BTreeMap::new(),
+                breaks,
+            )
+        };
+        let mixed = &analyze(&[])["windows"][0];
+        assert!((mixed["unattributed"].as_f64().unwrap() - 4.0).abs() < 1e-9);
+        let split = &analyze(&[4 * DAY + 3600])["windows"][0];
+        assert!(split["unattributed"].as_f64().unwrap().abs() < 1e-9);
+        assert!((split["pointsPerMillion"].as_f64().unwrap() - 20.0).abs() < 1e-9);
     }
 }

@@ -277,6 +277,14 @@ function render() {
   root.querySelector<HTMLButtonElement>('#usage-relay-join-button')?.addEventListener('click', () => { void usageRelayAction('usage_relay_join', { code: root.querySelector<HTMLInputElement>('#usage-relay-join')!.value }, 'Joined. Shared usage arrives with the next refresh.'); });
   root.querySelector<HTMLButtonElement>('#usage-relay-leave')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: false }, 'This computer left the usage channel. Shared rows already received are kept.'); });
   root.querySelector<HTMLButtonElement>('#usage-relay-delete')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: true }, 'Channel deleted from the relay. Other computers and cloud sessions can no longer use it.'); });
+  const ledgerAction = (command: string, args: Record<string, unknown>) => { void invoke<Dashboard>(command, args).then(next => { state = next; setNotice('ledger', ''); render(); }, error => { setNotice('ledger', String(error)); render(); }); };
+  root.querySelectorAll<HTMLButtonElement>('[data-ledger-add]').forEach(button => button.addEventListener('click', () => {
+    const provider = button.dataset.ledgerAdd!;
+    ledgerAction('add_ledger_mark', { provider, date: root.querySelector<HTMLInputElement>(`#ledger-date-${provider}`)!.value, plan: root.querySelector<HTMLInputElement>(`#ledger-plan-${provider}`)!.checked, text: root.querySelector<HTMLInputElement>(`#ledger-text-${provider}`)!.value });
+  }));
+  root.querySelectorAll<HTMLButtonElement>('[data-ledger-remove]').forEach(button => button.addEventListener('click', () => {
+    ledgerAction('remove_ledger_mark', { provider: button.dataset.ledgerRemove, at: Number(button.dataset.at), kind: button.dataset.kind });
+  }));
   root.querySelectorAll<HTMLButtonElement>('[data-ledger-days]').forEach(button => button.addEventListener('click', () => {
     void invoke<Dashboard>('set_ledger_days', { days: Number(button.dataset.ledgerDays) }).then(next => { state = next; render(); }, error => { setNotice('ledger', String(error)); render(); });
   }));

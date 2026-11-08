@@ -24,7 +24,7 @@ const state = () => ({
 const ledgerDays=(seed,hidden)=>Array.from({length:21},(_,i)=>{const date=new Date(Date.UTC(2026,9,8+i)).toISOString().slice(0,10);const weighted=200000+((i*seed)%7)*60000;const explained=weighted*1e-5;const unattributed=i>=hidden?2+(i%3):0;return {date,points:explained+unattributed,weighted,explained,unattributed};});
 const ledgerWindow=(id,label,seed,hidden,change)=>{const days=ledgerDays(seed,hidden);const points=days.reduce((s,d)=>s+d.points,0);const explained=days.reduce((s,d)=>s+d.explained,0);return {id,label,enough:true,activeDays:21,pointsPerMillion:10,pointsPerDollar:id.startsWith('codex')?null:0.8,points,explained,unattributed:points-explained,idlePoints:6,idleSteps:[now()-3600*3,now()-3600*27,now()-3600*51,now()-3600*75],change,days};};
 const consistency={
-  codex:{account:'fixture',days:28,limitHits:0,windows:[ledgerWindow('codex/primary','Codex · 5-hour',3,40,null),ledgerWindow('codex/secondary','Codex · weekly',5,14,{date:'2026-10-22',factor:1.8})],
+  codex:{account:'fixture',days:28,limitHits:0,marks:[{at:Date.UTC(2026,9,21)/1000,kind:'plan',source:'auto',text:'Plan changed from pro to plus'},{at:Date.UTC(2026,9,25)/1000,kind:'note',source:'manual',text:'Started a big refactor'}],windows:[ledgerWindow('codex/primary','Codex · 5-hour',3,40,null),ledgerWindow('codex/secondary','Codex · weekly',5,14,{date:'2026-10-22',factor:1.8})],
     surfaces:[{surface:'codex',querySource:'',model:'gpt-5.6-sol',requests:812,input:2100000,output:640000,cacheRead:41000000,cacheWrite:0,costUsd:0}],cacheReadShare:0.95,
     serverVsLocal:Array.from({length:10},(_,i)=>({date:new Date(Date.UTC(2026,9,19+i)).toISOString().slice(0,10),server:9000000+i*400000,local:5200000+i*100000}))},
   claude:{account:'fixture',days:28,limitHits:2,windows:[ledgerWindow('five_hour','5-hour allowance',2,18,null),ledgerWindow('seven_day','7-day allowance',4,10,null)],
@@ -49,6 +49,7 @@ window.__TAURI_INTERNALS__={
     if(command==='get_dashboard'||command==='refresh_dashboard')return structuredClone(state());
     if(command==='get_compact_dashboard')return compactRows();
     if(command==='usage_relay_status'||command==='sync_relay')return null;
+    if(command==='add_ledger_mark'||command==='remove_ledger_mark')return structuredClone(state());
     if(command==='set_ledger_days'){ledgerRange=args.days;return structuredClone(state());}
     if(command==='save_settings'){settings=structuredClone(args.settings);return structuredClone(state());}
     throw new Error('Preview does not perform '+command);
