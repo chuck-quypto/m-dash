@@ -265,7 +265,7 @@ pub fn analyze(
             "change":change_point(&ratios),"days":day_rows,
         }));
     }
-    let mut groups: BTreeMap<(String, String, String), [f64; 6]> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String, String), [f64; 7]> = BTreeMap::new();
     for row in usage {
         let group = groups
             .entry((
@@ -279,7 +279,10 @@ pub fn analyze(
         group[2] += row.output as f64;
         group[3] += row.cache_read as f64;
         group[4] += row.cache_write as f64;
-        group[5] += row.cost_micros.unwrap_or(0) as f64 / 1e6;
+        if let Some(cost) = row.cost_micros {
+            group[5] += cost as f64 / 1e6;
+            group[6] += 1.0;
+        }
     }
     let read: f64 = usage.iter().map(|row| row.cache_read as f64).sum();
     let prompt: f64 = usage
@@ -299,7 +302,7 @@ pub fn analyze(
     json!({
         "windows":windows,
         "surfaces":groups.into_iter().map(|((surface,source,model),g)| json!({"surface":surface,"querySource":source,"model":model,
-            "requests":g[0],"input":g[1],"output":g[2],"cacheRead":g[3],"cacheWrite":g[4],"costUsd":g[5]})).collect::<Vec<_>>(),
+            "requests":g[0],"input":g[1],"output":g[2],"cacheRead":g[3],"cacheWrite":g[4],"costUsd":g[5],"pricedRequests":g[6]})).collect::<Vec<_>>(),
         "cacheReadShare":(prompt > 0.0).then(|| read / prompt),
         "serverVsLocal":server,
     })
@@ -368,6 +371,7 @@ mod tests {
         assert_eq!(window["idleSteps"], json!([4 * DAY + 5000]));
         assert!(window["change"].is_null());
         assert_eq!(result["surfaces"][0]["requests"], 10.0);
+        assert_eq!(result["surfaces"][0]["pricedRequests"], 10.0);
     }
 
     #[test]

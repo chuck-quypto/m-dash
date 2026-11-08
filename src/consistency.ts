@@ -9,7 +9,7 @@ export interface LedgerWindow {
 }
 export interface LedgerSurface {
   surface: string; querySource: string; model: string; requests: number;
-  input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number;
+  input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number; pricedRequests?: number;
 }
 export interface Ledger {
   account: string; days: number; limitHits: number; windows: LedgerWindow[]; surfaces: LedgerSurface[];
@@ -53,13 +53,21 @@ function windowCard(provider: 'codex' | 'claude', window: LedgerWindow) {
     ${window.idlePoints > 0 ? `<p class="support">${number.format(window.idlePoints)} points moved while no request was seen on this computer.</p>${idleHours(window.idleSteps)}` : ''}</div>`;
 }
 
+// Only some sources report a price: requests without one show as unknown rather than as free.
+function apiPrice(row: LedgerSurface) {
+  const priced = row.pricedRequests ?? (row.costUsd > 0 ? row.requests : 0);
+  if (!priced) return '<span title="This source does not report a price">—</span>';
+  if (priced < row.requests) return `<span title="Price reported for ${compact.format(priced)} of ${compact.format(row.requests)} requests">${usd.format(row.costUsd)}+</span>`;
+  return usd.format(row.costUsd);
+}
+
 function surfaces(ledger: Ledger) {
   const sorted = [...ledger.surfaces].sort((a, b) => (b.input + b.output + b.cacheRead + b.cacheWrite) - (a.input + a.output + a.cacheRead + a.cacheWrite));
   // The 12 largest groups, plus every cloud-session group, which is small beside local use but is the point of the relay.
   const rows = [...sorted.slice(0, 12), ...sorted.slice(12).filter(row => row.surface === 'cloud')];
   if (!rows.length) return '';
   const showCost = rows.some(row => row.costUsd > 0);
-  return `<table><caption class="sr-only">Observed usage by where it ran, purpose and model</caption><thead><tr><th scope="col">Where</th><th scope="col">Purpose</th><th scope="col">Model</th><th scope="col" class="numeric">Requests</th><th scope="col" class="numeric">Input</th><th scope="col" class="numeric">Output</th><th scope="col" class="numeric">Cache read</th><th scope="col" class="numeric">Cache write</th>${showCost ? '<th scope="col" class="numeric">API price</th>' : ''}</tr></thead><tbody>${rows.map(row => `<tr><td>${escape(surfaceNames[row.surface] ?? row.surface)}</td><td>${escape(row.querySource || '—')}</td><td>${escape(row.model || '—')}</td><td class="numeric">${compact.format(row.requests)}</td><td class="numeric">${compact.format(row.input)}</td><td class="numeric">${compact.format(row.output)}</td><td class="numeric">${compact.format(row.cacheRead)}</td><td class="numeric">${compact.format(row.cacheWrite)}</td>${showCost ? `<td class="numeric">${usd.format(row.costUsd)}</td>` : ''}</tr>`).join('')}</tbody></table>`;
+  return `<table><caption class="sr-only">Observed usage by where it ran, purpose and model</caption><thead><tr><th scope="col">Where</th><th scope="col">Purpose</th><th scope="col">Model</th><th scope="col" class="numeric">Requests</th><th scope="col" class="numeric">Input</th><th scope="col" class="numeric">Output</th><th scope="col" class="numeric">Cache read</th><th scope="col" class="numeric">Cache write</th>${showCost ? '<th scope="col" class="numeric">API price</th>' : ''}</tr></thead><tbody>${rows.map(row => `<tr><td>${escape(surfaceNames[row.surface] ?? row.surface)}</td><td>${escape(row.querySource || '—')}</td><td>${escape(row.model || '—')}</td><td class="numeric">${compact.format(row.requests)}</td><td class="numeric">${compact.format(row.input)}</td><td class="numeric">${compact.format(row.output)}</td><td class="numeric">${compact.format(row.cacheRead)}</td><td class="numeric">${compact.format(row.cacheWrite)}</td>${showCost ? `<td class="numeric">${apiPrice(row)}</td>` : ''}</tr>`).join('')}</tbody></table>`;
 }
 
 function serverVsLocal(ledger: Ledger) {
