@@ -6,6 +6,11 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+### Added
+- A step-by-step guide, [Cloud sessions and other computers](docs/CLOUD_USAGE.md),
+  for deploying your own relay, creating and joining a usage channel, and
+  setting up a Claude cloud environment, with checks and how to undo it.
+
 ### Fixed
 - The **API price** column on Allowance vs tokens shows "—" for usage whose
   source reports no price, such as terminal sessions read from session logs,

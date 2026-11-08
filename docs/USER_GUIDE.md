@@ -97,6 +97,10 @@ Keep m-dash running and enable this on only one computer per account. The app ch
 
 Choose **On · turn off** to stop future pings. An already submitted request may finish. Turning off the Claude provider also disables ping. A new sign-in needs fresh confirmation. The local token feed is independent; turning that feed off does not turn ping off. Your installation starts with ping off, including after upgrade.
 
+## Allowance vs tokens
+
+**Allowance vs tokens** compares how far each Codex and Claude allowance moved over the last 28 days with the tokens seen on this computer. Usage m-dash can't see, such as cloud sessions, chat and mobile apps or other computers, shows as *unattributed*. A note appears when the points-per-token rate shifts; a plan change, a provider change or more usage elsewhere can all cause one. Turn on **Local session logs** in Settings for per-request detail. To count Claude Code cloud sessions and your other computers, follow [Cloud sessions and other computers](CLOUD_USAGE.md), which walks through deploying your own relay and setting up the cloud environment.
+
 ## Android companion (experimental)
 
 Android and mobile sync are experimental and outside this desktop release. A fresh install has no configured relay or enrollment credential. No managed relay or Android download is promised. Developers can review [relay setup boundaries](../relay/README.md) and the [protocol](development/SYNC_PROTOCOL.md).

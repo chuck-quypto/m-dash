@@ -92,6 +92,8 @@ previews and notices, and [architecture](docs/ARCHITECTURE.md) for how the piece
 - [User guide](docs/USER_GUIDE.md): install, connect providers, tray, upgrades
 - [Providers](docs/PROVIDERS.md): how each provider is read and what can break
 - [Privacy and storage](docs/PRIVACY.md): what is stored and what leaves your computer
+- [Cloud sessions and other computers](docs/CLOUD_USAGE.md): step-by-step relay and
+  Claude cloud environment setup for the Allowance vs tokens page
 - [Architecture](docs/ARCHITECTURE.md) and [development](docs/DEVELOPMENT.md)
 - [Releasing and verification](RELEASING.md) and the [changelog](CHANGELOG.md)
 
