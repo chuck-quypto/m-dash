@@ -10,8 +10,13 @@ Notable changes to the m-dash desktop app. The format follows
 - A step-by-step guide, [Cloud sessions and other computers](docs/CLOUD_USAGE.md),
   for deploying your own relay, creating and joining a usage channel, and
   setting up a Claude cloud environment, with checks and how to undo it.
+- Allowance vs tokens has a **7 / 28 / 90 days** range. The choice is remembered.
 
 ### Changed
+- Allowance vs tokens now says "explained by observed usage" and names where
+  that usage came from (this computer, your other computers, cloud sessions),
+  since usage shared over the usage channel already counted. Before, it said
+  "tokens on this computer" even when it wasn't only this computer.
 - Relays no longer have to be on Cloudflare `workers.dev`. m-dash accepts any
   public HTTPS relay address (still no path, port, IP address or localhost), and
   the guide lists the relay's contract for hosting it elsewhere. A relay is never

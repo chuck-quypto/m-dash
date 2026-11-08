@@ -25,6 +25,8 @@ pub struct Dashboard {
     pub forecasts: Vec<Value>,
     /// Burn ledgers keyed by provider, comparing allowance use with observed tokens.
     pub consistency: Value,
+    /// Days of history the burn ledgers cover: 7, 28 or 90.
+    pub ledger_days: u64,
     pub usage_relay_error: Option<String>,
 }
 

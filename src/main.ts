@@ -32,6 +32,7 @@ interface Dashboard {
   claudePing: { enabled: boolean; message: string; lastAttempt: number | null; lastTokens: number | null };
   forecasts: Forecast[];
   consistency: Ledgers;
+  ledgerDays?: number;
   usageRelayError: string | null;
 }
 interface Forecast {
@@ -80,7 +81,7 @@ let historyProvider: 'codex' | 'claude' | 'openrouter' = 'codex';
 let setupBusy = false;
 // Results of Settings actions are shown beside the control that produced them and belong to
 // the Settings page: leaving it clears them, so a confirmation never lingers on other pages.
-type NoticeScope = 'preferences' | 'claudeFeed' | 'claudePing' | 'openrouter' | 'usageRelay';
+type NoticeScope = 'preferences' | 'claudeFeed' | 'claudePing' | 'openrouter' | 'usageRelay' | 'ledger';
 let notice: { scope: NoticeScope; text: string } | null = null;
 const setNotice = (scope: NoticeScope, text: string) => { notice = text ? { scope, text } : null; };
 const noticeLine = (scope: NoticeScope) => notice?.scope === scope ? `<p class="action-notice" role="status">${escape(notice.text)}</p>` : '';
@@ -261,7 +262,7 @@ function render() {
     <nav aria-label="Dashboard views">${(['overview', 'history', 'consistency', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'consistency' ? 'Allowance vs tokens' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
     ${appError ? `<div class="error" role="alert">${escape(appError)}</div>` : ''}
     ${state.settings.providers.codex && state.error ? `<div class="error" role="status"><strong>Couldn’t refresh Codex.</strong> ${escape(state.error)}${state.snapshot ? ' Showing the last successful observation.' : ''}</div>` : ''}
-    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled) : connections()}
+    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? noticeLine('ledger') + consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled, state.ledgerDays || 28) : connections()}
     <footer><span>m-dash ${escape(appVersion)} · Use the tray to open, refresh or quit</span><span>${state.nextRefresh ? `Next refresh ${dateTime(state.nextRefresh)}` : enabledCount ? 'Connect an account to collect readings' : 'Collection paused'}</span></footer></main>`;
   root.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => { void refresh(); });
   root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; render(); }));
@@ -276,6 +277,9 @@ function render() {
   root.querySelector<HTMLButtonElement>('#usage-relay-join-button')?.addEventListener('click', () => { void usageRelayAction('usage_relay_join', { code: root.querySelector<HTMLInputElement>('#usage-relay-join')!.value }, 'Joined. Shared usage arrives with the next refresh.'); });
   root.querySelector<HTMLButtonElement>('#usage-relay-leave')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: false }, 'This computer left the usage channel. Shared rows already received are kept.'); });
   root.querySelector<HTMLButtonElement>('#usage-relay-delete')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: true }, 'Channel deleted from the relay. Other computers and cloud sessions can no longer use it.'); });
+  root.querySelectorAll<HTMLButtonElement>('[data-ledger-days]').forEach(button => button.addEventListener('click', () => {
+    void invoke<Dashboard>('set_ledger_days', { days: Number(button.dataset.ledgerDays) }).then(next => { state = next; render(); }, error => { setNotice('ledger', String(error)); render(); });
+  }));
   root.querySelector<HTMLButtonElement>('#copy-ledger')?.addEventListener('click', event => {
     const button = event.currentTarget as HTMLButtonElement;
     navigator.clipboard.writeText(ledgerCsv(state.consistency ?? {})).then(() => { button.textContent = 'Copied'; }, () => { button.textContent = 'Copy failed'; });

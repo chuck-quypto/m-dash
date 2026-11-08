@@ -459,6 +459,20 @@ fn set_claude_enabled(app: tauri::AppHandle, enabled: bool) -> Result<Dashboard,
 }
 
 #[tauri::command]
+fn set_ledger_days(app: tauri::AppHandle, days: u64) -> Result<Dashboard, String> {
+    let state = app.state::<AppState>();
+    let mut inner = state
+        .0
+        .lock()
+        .map_err(|_| "The collector state is unavailable.")?;
+    inner.store.save_ledger_days(days)?;
+    inner.dashboard.ledger_days = days;
+    update_consistency(&mut inner, collector::now());
+    publish_dashboard(&app, &inner.dashboard);
+    Ok(inner.dashboard.clone())
+}
+
+#[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<Dashboard, String> {
     let state = app.state::<AppState>();
     let mut inner = state
@@ -906,7 +920,11 @@ fn update_consistency(inner: &mut Inner, now: u64) {
         ),
     ] {
         if let Some(snapshot) = snapshot.as_ref().filter(|_| enabled) {
-            if let Ok(ledger) = inner.store.consistency(provider, snapshot, now, 28) {
+            if let Ok(ledger) =
+                inner
+                    .store
+                    .consistency(provider, snapshot, now, inner.dashboard.ledger_days)
+            {
                 ledgers.insert(name.into(), ledger);
             }
         }
@@ -966,7 +984,7 @@ pub fn run() {
         }))
         .manage(CompactState::default())
         .manage(mobile_sync::State::default())
-        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
+        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, set_ledger_days, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             macos_lifecycle::install(app.handle());
@@ -1035,6 +1053,7 @@ pub fn run() {
                     claude_ping: ping.status(),
                     claude_error,
                     observations,
+                    ledger_days: store.ledger_days(),
                     ..Default::default()
                 },
                 store,
