@@ -3,7 +3,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
-import { consistencyPage, ledgerCsv, type Ledgers } from './consistency';
+import { consistencyPage, ledgerCsv, remainingWorth, type Ledgers } from './consistency';
 import { alertMark, alertSentence, timeLeftSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
@@ -114,7 +114,9 @@ function alertParts(provider: string, windowId: string | null, remaining: number
   const facts = stale ? null : windowAlert(provider, windowId, remaining, resetsAt, restricted, state.forecasts);
   const sentence = facts ? alertSentence(facts, dateTime) : '';
   const left = stale || restricted ? '' : timeLeftSentence(provider, windowId, state.forecasts, Date.now() / 1000);
-  return { alert: facts?.alert ?? null, mark: alertMark(facts?.alert ?? null), left: left ? `<p class="support time-left">${escape(left)}</p>` : '', line: sentence ? `<p class="alert-line" role="status">${alertMark(facts!.alert)} ${escape(sentence)}</p>` : '' };
+  const ledger = provider === 'Codex' || provider === 'Claude' ? provider.toLowerCase() as 'codex' | 'claude' : null;
+  const worth = ledger && !restricted && !stale ? remainingWorth(state.consistency ?? {}, ledger, windowId, remaining) : '';
+  return { alert: facts?.alert ?? null, mark: alertMark(facts?.alert ?? null), left: `${left ? `<p class="support time-left">${escape(left)}</p>` : ''}${worth ? `<p class="support">${escape(worth)}</p>` : ''}`, line: sentence ? `<p class="alert-line" role="status">${alertMark(facts!.alert)} ${escape(sentence)}</p>` : '' };
 }
 function openrouterCard() {
   const snapshot = state.openrouter;
@@ -277,6 +279,14 @@ function render() {
   root.querySelector<HTMLButtonElement>('#usage-relay-join-button')?.addEventListener('click', () => { void usageRelayAction('usage_relay_join', { code: root.querySelector<HTMLInputElement>('#usage-relay-join')!.value }, 'Joined. Shared usage arrives with the next refresh.'); });
   root.querySelector<HTMLButtonElement>('#usage-relay-leave')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: false }, 'This computer left the usage channel. Shared rows already received are kept.'); });
   root.querySelector<HTMLButtonElement>('#usage-relay-delete')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: true }, 'Channel deleted from the relay. Other computers and cloud sessions can no longer use it.'); });
+  const ledgerAction = (command: string, args: Record<string, unknown>) => { void invoke<Dashboard>(command, args).then(next => { state = next; setNotice('ledger', ''); render(); }, error => { setNotice('ledger', String(error)); render(); }); };
+  root.querySelectorAll<HTMLButtonElement>('[data-ledger-add]').forEach(button => button.addEventListener('click', () => {
+    const provider = button.dataset.ledgerAdd!;
+    ledgerAction('add_ledger_mark', { provider, date: root.querySelector<HTMLInputElement>(`#ledger-date-${provider}`)!.value, plan: root.querySelector<HTMLInputElement>(`#ledger-plan-${provider}`)!.checked, text: root.querySelector<HTMLInputElement>(`#ledger-text-${provider}`)!.value });
+  }));
+  root.querySelectorAll<HTMLButtonElement>('[data-ledger-remove]').forEach(button => button.addEventListener('click', () => {
+    ledgerAction('remove_ledger_mark', { provider: button.dataset.ledgerRemove, at: Number(button.dataset.at), kind: button.dataset.kind });
+  }));
   root.querySelectorAll<HTMLButtonElement>('[data-ledger-days]').forEach(button => button.addEventListener('click', () => {
     void invoke<Dashboard>('set_ledger_days', { days: Number(button.dataset.ledgerDays) }).then(next => { state = next; render(); }, error => { setNotice('ledger', String(error)); render(); });
   }));

@@ -472,6 +472,82 @@ fn set_ledger_days(app: tauri::AppHandle, days: u64) -> Result<Dashboard, String
     Ok(inner.dashboard.clone())
 }
 
+/// The signed-in account a ledger belongs to: "codex" or "claude".
+fn ledger_account(inner: &Inner, provider: &str) -> Result<String, String> {
+    let snapshot = match provider {
+        "codex" => &inner.dashboard.snapshot,
+        "claude" => &inner.dashboard.claude,
+        _ => return Err("Unknown ledger.".into()),
+    };
+    snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot["accountId"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "Sign in before adding notes to this ledger.".into())
+}
+
+/// Midnight UTC of a YYYY-MM-DD date, the day boundary the ledger uses.
+fn ledger_day(date: &str) -> Result<i64, String> {
+    let invalid = || "Choose a valid date.".to_string();
+    let mut parts = date.splitn(3, '-').map(|part| part.parse::<i32>().ok());
+    let (Some(Some(year)), Some(Some(month)), Some(Some(day))) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(invalid());
+    };
+    let month = u8::try_from(month)
+        .ok()
+        .and_then(|month| time::Month::try_from(month).ok())
+        .ok_or_else(invalid)?;
+    let day = u8::try_from(day).map_err(|_| invalid())?;
+    time::Date::from_calendar_date(year, month, day)
+        .map(|day| day.midnight().assume_utc().unix_timestamp())
+        .map_err(|_| invalid())
+}
+
+#[tauri::command]
+fn add_ledger_mark(
+    app: tauri::AppHandle,
+    provider: String,
+    date: String,
+    plan: bool,
+    text: String,
+) -> Result<Dashboard, String> {
+    let state = app.state::<AppState>();
+    let mut inner = state
+        .0
+        .lock()
+        .map_err(|_| "The collector state is unavailable.")?;
+    let account = ledger_account(&inner, &provider)?;
+    let at = ledger_day(&date)?;
+    if at > collector::now() as i64 {
+        return Err("Choose today or an earlier date.".into());
+    }
+    inner.store.add_ledger_mark(&account, at, plan, &text)?;
+    update_consistency(&mut inner, collector::now());
+    publish_dashboard(&app, &inner.dashboard);
+    Ok(inner.dashboard.clone())
+}
+
+#[tauri::command]
+fn remove_ledger_mark(
+    app: tauri::AppHandle,
+    provider: String,
+    at: i64,
+    kind: String,
+) -> Result<Dashboard, String> {
+    let state = app.state::<AppState>();
+    let mut inner = state
+        .0
+        .lock()
+        .map_err(|_| "The collector state is unavailable.")?;
+    let account = ledger_account(&inner, &provider)?;
+    inner.store.remove_ledger_mark(&account, at, &kind)?;
+    update_consistency(&mut inner, collector::now());
+    publish_dashboard(&app, &inner.dashboard);
+    Ok(inner.dashboard.clone())
+}
+
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<Dashboard, String> {
     let state = app.state::<AppState>();
@@ -984,7 +1060,7 @@ pub fn run() {
         }))
         .manage(CompactState::default())
         .manage(mobile_sync::State::default())
-        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, set_ledger_days, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
+        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, set_ledger_days, add_ledger_mark, remove_ledger_mark, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             macos_lifecycle::install(app.handle());

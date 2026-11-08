@@ -3,7 +3,7 @@
 export interface LedgerDay { date: string; points: number; weighted: number; explained: number; unattributed: number }
 export interface LedgerWindow {
   id: string; label: string; enough: boolean; activeDays: number;
-  pointsPerMillion: number | null; pointsPerDollar: number | null;
+  pointsPerMillion: number | null; pointsPerDollar: number | null; rateDays?: number; rateRange?: [number, number] | null;
   points: number; explained: number; unattributed: number; idlePoints: number; idleSteps: number[];
   change: { date: string; factor: number; daysAfter?: number } | null; days: LedgerDay[];
 }
@@ -11,7 +11,9 @@ export interface LedgerSurface {
   surface: string; querySource: string; model: string; requests: number;
   input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number; pricedRequests?: number;
 }
+export interface LedgerMark { at: number; kind: 'plan' | 'note'; source: 'auto' | 'manual'; text: string }
 export interface Ledger {
+  marks?: LedgerMark[];
   account: string; days: number; limitHits: number; windows: LedgerWindow[]; surfaces: LedgerSurface[];
   cacheReadShare: number | null; serverVsLocal: { date: string; server: number; local: number }[];
 }
@@ -27,10 +29,15 @@ const surfaceNames: Record<string, string> = { cli: 'Terminal', desktop: 'Deskto
 const surfaceName = (surface: string) => surface.startsWith('other:') ? `Other computer · ${surfaceNames[surface.slice(6)] ?? surface.slice(6)}` : surfaceNames[surface] ?? surface;
 const shared = (surface: string) => surface === 'cloud' || surface.startsWith('other:');
 
-function dayBars(window: LedgerWindow) {
+const markDate = (mark: LedgerMark) => new Date(mark.at * 1000).toISOString().slice(0, 10);
+const dayNumber = (date: string) => Date.parse(`${date}T00:00:00Z`) / 86_400_000;
+
+function dayBars(window: LedgerWindow, marks: LedgerMark[]) {
   const days = window.days;
+  const marked = new Map<string, string[]>();
+  for (const mark of marks) marked.set(markDate(mark), [...(marked.get(markDate(mark)) ?? []), mark.text]);
   const max = Math.max(...days.map(day => day.points), 1);
-  return `<div class="chart ledger-chart" role="img" aria-label="${escape(window.label)}: allowance points per day, explained and unattributed. Exact values are in the copied CSV.">${days.map(day => `<div class="bar-cell" title="${escape(day.date)}: ${number.format(day.points)} points, ${number.format(day.explained)} explained, ${number.format(day.unattributed)} unattributed"><div class="ledger-stack" style="height:${Math.max(2, day.points / max * 100)}%"><div class="ledger-unattributed" style="flex:${day.unattributed}"></div><div class="ledger-explained" style="flex:${day.explained}"></div></div></div>`).join('')}</div>
+  return `<div class="chart ledger-chart" role="img" aria-label="${escape(window.label)}: allowance points per day, explained and unattributed. Exact values are in the copied CSV.">${days.map(day => `<div class="bar-cell${marked.has(day.date) ? ' marked' : ''}" title="${escape(day.date)}: ${number.format(day.points)} points, ${number.format(day.explained)} explained, ${number.format(day.unattributed)} unattributed${marked.has(day.date) ? ` · ${escape(marked.get(day.date)!.join(' · '))}` : ''}"><div class="ledger-stack" style="height:${Math.max(2, day.points / max * 100)}%"><div class="ledger-unattributed" style="flex:${day.unattributed}"></div><div class="ledger-explained" style="flex:${day.explained}"></div></div></div>`).join('')}</div>
     <div class="chart-axis"><span>${escape(days[0]?.date ?? '')}</span><span>${escape(days.at(-1)?.date ?? '')}</span></div>`;
 }
 
@@ -42,16 +49,38 @@ function idleHours(steps: number[]) {
   return `<h4>Steps with no observed usage, by hour (your time)</h4><div class="chart ledger-hours" role="img" aria-label="Allowance steps with no observed usage by hour of day">${hours.map((count, hour) => `<div class="bar-cell" title="${hour}:00: ${count} step${count === 1 ? '' : 's'}"><div class="bar" style="height:${count ? Math.max(4, count / max * 100) : 0}%"></div></div>`).join('')}</div><div class="chart-axis"><span>0:00</span><span>12:00</span><span>23:00</span></div>`;
 }
 
-function windowCard(provider: 'codex' | 'claude', window: LedgerWindow) {
+// How far to trust the learned rate: the days it rests on and the spread of the efficient days.
+export function confidence(window: LedgerWindow) {
+  const days = window.rateDays ?? window.activeDays;
+  const range = window.rateRange;
+  const wide = range ? range[1] / range[0] : 1;
+  const level = days >= 14 && wide < 2 ? 'Good estimate' : days >= 7 && wide < 3 ? 'Fair estimate' : 'Rough estimate';
+  const spread = range && range[1] > range[0] * 1.05 ? `, efficient days ranged ${compact.format(1e6 / range[1])}–${compact.format(1e6 / range[0])} tokens per point` : '';
+  return `<span class="${level === 'Rough estimate' ? 'warning-text' : ''}">${level}: ${days} active day${days === 1 ? '' : 's'}${window.rateDays != null && window.rateDays < window.activeDays ? ' since the last plan change' : ''}${spread}.</span>`;
+}
+
+// What the allowance left means in tokens and, for Claude, API-priced usage, at the learned rate.
+export function remainingWorth(ledgers: Ledgers, provider: 'codex' | 'claude', windowId: string | null, remaining: number | null) {
+  const window = ledgers[provider]?.windows.find(item => item.id === windowId);
+  if (!window?.enough || !window.pointsPerMillion || remaining == null || remaining <= 0) return '';
+  const tokens = remaining / window.pointsPerMillion * 1e6;
+  const price = provider === 'claude' && window.pointsPerDollar ? ` (about ${usd.format(remaining / window.pointsPerDollar)} of API-priced usage)` : '';
+  return `≈ ${compact.format(tokens)} weighted tokens${price} left at your learned rate.`;
+}
+
+function windowCard(provider: 'codex' | 'claude', window: LedgerWindow, marks: LedgerMark[]) {
   const share = window.points > 0 ? window.unattributed / window.points : 0;
-  const rate = window.pointsPerMillion == null ? '' : provider === 'claude' && window.pointsPerDollar != null
+  const rate = window.pointsPerMillion == null ? '' : `${provider === 'claude' && window.pointsPerDollar != null
     ? `One point ≈ ${usd.format(1 / window.pointsPerDollar)} of API-priced usage (${compact.format(1e6 / window.pointsPerMillion)} weighted tokens).`
-    : `One point ≈ ${compact.format(1e6 / window.pointsPerMillion)} weighted tokens.`;
+    : `One point ≈ ${compact.format(1e6 / window.pointsPerMillion)} weighted tokens.`} ${confidence(window)}`;
   const shift = window.change;
   const after = shift?.daysAfter;
-  const change = shift ? `<p class="warning-text">Around ${escape(shift.date)}, each point started matching ${shift.factor > 1 ? `about ${number.format(shift.factor)}× fewer` : `about ${number.format(1 / shift.factor)}× more`} observed tokens${after ? ` (${after} day${after === 1 ? '' : 's'} of data since)` : ''}. A plan change, a provider change or more usage elsewhere can all cause this.</p>` : '';
+  // A plan change or note within three days of the shift is the likely explanation.
+  const near = shift ? marks.filter(mark => Math.abs(dayNumber(markDate(mark)) - dayNumber(shift.date)) <= 3) : [];
+  const cause = near.length ? ` That lines up with ${near.map(mark => `<strong>${escape(mark.text)}</strong> (${escape(markDate(mark))})`).join(' and ')}.` : ' A plan change, a provider change or more usage elsewhere can all cause this. If you changed plans, add it under <strong>Plan changes and notes</strong>.';
+  const change = shift ? `<p class="${near.length ? 'support' : 'warning-text'}">Around ${escape(shift.date)}, each point started matching ${shift.factor > 1 ? `about ${number.format(shift.factor)}× fewer` : `about ${number.format(1 / shift.factor)}× more`} observed tokens${after ? ` (${after} day${after === 1 ? '' : 's'} of data since)` : ''}.${cause}</p>` : '';
   return `<div class="ledger-window"><h3>${escape(window.label)}</h3>
-    ${window.enough ? `<p><strong>${number.format(window.points)}</strong> points used · <strong>${number.format(window.explained)}</strong> explained by observed usage · <strong class="${share >= 0.25 ? 'warning-text' : ''}">${number.format(window.unattributed)}</strong> unattributed (${percent.format(share)})</p><p class="support">${rate}</p>${change}${dayBars(window)}`
+    ${window.enough ? `<p><strong>${number.format(window.points)}</strong> points used · <strong>${number.format(window.explained)}</strong> explained by observed usage · <strong class="${share >= 0.25 ? 'warning-text' : ''}">${number.format(window.unattributed)}</strong> unattributed (${percent.format(share)})</p><p class="support">${rate}</p>${change}${dayBars(window, marks)}`
       : `<p class="empty">Needs three days with both allowance movement and local usage. ${window.activeDays} so far.</p>`}
     ${window.idlePoints > 0 ? `<p class="support">${number.format(window.idlePoints)} points moved while m-dash saw no usage.</p>${idleHours(window.idleSteps)}` : ''}</div>`;
 }
@@ -84,6 +113,16 @@ function serverVsLocal(ledger: Ledger) {
     <table><caption class="sr-only">Codex daily tokens: account and ${here.toLowerCase()}</caption><thead><tr><th scope="col">Provider day</th><th scope="col" class="numeric">Account</th><th scope="col" class="numeric">${here}</th></tr></thead><tbody>${[...rows].reverse().map(row => `<tr><td>${escape(row.date)}</td><td class="numeric">${compact.format(row.server)}</td><td class="numeric">${compact.format(row.local)}</td></tr>`).join('')}</tbody></table>`;
 }
 
+// Plan changes m-dash saw, plus the owner's own notes. A plan change, seen or added, gives the
+// days after it their own baseline rate.
+function notes(provider: 'codex' | 'claude', ledger: Ledger) {
+  const marks = ledger.marks ?? [];
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = marks.length ? `<ul class="ledger-marks">${[...marks].reverse().map(mark => `<li><span class="ledger-mark-date">${escape(markDate(mark))}</span> ${escape(mark.text)}${mark.kind === 'plan' ? ' <span class="support">· plan change</span>' : ''}${mark.source === 'manual' ? ` <button class="text-button" data-ledger-remove="${provider}" data-at="${mark.at}" data-kind="${mark.kind}">Remove</button>` : ''}</li>`).join('')}</ul>` : '<p class="empty">No plan changes or notes in this range.</p>';
+  return `<h3>Plan changes and notes</h3><p class="support">m-dash records plan changes it can see. Add ones it can't, such as moving between price tiers that report the same plan name, so rates before and after are learned separately. Notes only label the chart. Dates are UTC days, like the chart.</p>${rows}
+    <div class="ledger-mark-form"><label>Date <input type="date" id="ledger-date-${provider}" max="${today}" value="${today}"></label><label class="grow">Note <input type="text" id="ledger-text-${provider}" maxlength="200" placeholder="Moved to the $100 plan"></label><label class="check"><input type="checkbox" id="ledger-plan-${provider}"> Plan change</label><button class="text-button" data-ledger-add="${provider}">Add</button></div>`;
+}
+
 export function ledgerCsv(ledgers: Ledgers) {
   const lines = ['provider,window,date,points,explained,unattributed,weighted_tokens'];
   for (const [provider, ledger] of Object.entries(ledgers) as [string, Ledger][])
@@ -111,7 +150,7 @@ function observedFrom(ledgers: Ledgers) {
 
 export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28) {
   const providers = (['codex', 'claude'] as const).filter(provider => enabled[provider]);
-  const intro = `<p class="support">Compares how far each allowance moved over the last ${days} days with the tokens m-dash observed on ${observedFrom(ledgers)}. Token types are weighted by the provider's published prices, and the baseline rate comes from your most efficient days. Anything above it is <strong>unattributed</strong>: usage m-dash did not see, such as chat and mobile apps, background agents such as Claude Duet, tasks started by ChatGPT Dots, Codex cloud tasks, or computers and cloud sessions not on your usage channel. A plan or provider change shows as a rate shift.</p>
+  const intro = `<p class="support">Compares how far each allowance moved over the last ${days} days with the tokens m-dash observed on ${observedFrom(ledgers)}. Token types are weighted by the provider's published prices, Claude models by their API price (an Opus token counts more than a Haiku token), and the baseline rate comes from your most efficient days, learned separately before and after each plan change. Anything above it is <strong>unattributed</strong>: usage m-dash did not see, such as chat and mobile apps, background agents such as Claude Duet, tasks started by ChatGPT Dots, Codex cloud tasks, or computers and cloud sessions not on your usage channel. A plan or provider change shows as a rate shift.</p>
     ${localLogs ? '' : '<p class="warning-text">Turn on <strong>Local session logs</strong> in Settings for Codex token detail and Claude sessions run while m-dash was closed.</p>'}
     ${enabled.claude && !claudeFeed ? '<p class="warning-text">Enable the Claude local feed in Settings for cost, cloud-session and subagent detail.</p>' : ''}`;
   if (!providers.length) return `<section class="panel"><h2>Allowance vs tokens</h2>${intro}<p class="empty">Enable Codex or Claude in Settings.</p></section>`;
@@ -121,10 +160,11 @@ export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; cla
       const name = provider === 'codex' ? 'Codex' : 'Claude';
       if (!ledger) return `<section class="panel"><h2>${name}</h2><p class="empty">The ledger appears after the next successful account read.</p></section>`;
       return `<section class="panel ledger"><h2>${name}</h2>
-        ${ledger.windows.length ? ledger.windows.map(window => windowCard(provider, window)).join('') : '<p class="empty">No allowance readings yet.</p>'}
+        ${ledger.windows.length ? ledger.windows.map(window => windowCard(provider, window, ledger.marks ?? [])).join('') : '<p class="empty">No allowance readings yet.</p>'}
         ${ledger.cacheReadShare != null ? `<p class="support">Cache reads were ${percent.format(ledger.cacheReadShare)} of prompt tokens. A sudden drop usually means repeated context was billed as fresh input.</p>` : ''}
         ${ledger.limitHits ? `<p class="warning-text">${ledger.limitHits} request${ledger.limitHits === 1 ? ' was' : 's were'} refused for a reached limit.</p>` : ''}
         ${provider === 'codex' ? serverVsLocal(ledger) : ''}
-        ${ledger.surfaces.length ? `<h3>Observed usage</h3>${surfaces(ledger)}` : '<p class="empty">No per-request usage has been recorded yet.</p>'}</section>`;
+        ${ledger.surfaces.length ? `<h3>Observed usage</h3>${surfaces(ledger)}` : '<p class="empty">No per-request usage has been recorded yet.</p>'}
+        ${notes(provider, ledger)}</section>`;
     }).join('')}`;
 }

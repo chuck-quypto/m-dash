@@ -43,16 +43,54 @@ pub enum Provider {
 
 /// Relative price of each token type against fresh input, from the providers' published
 /// price lists: Anthropic API prices for Claude and the Codex credit rate card for Codex
-/// (which counts reasoning inside output). Model price differences are not applied.
+/// (which counts reasoning inside output). Claude tokens are also scaled by their model's
+/// price (see `claude_model_factor`); Codex model differences are not applied.
 fn weighted(provider: Provider, usage: &Usage) -> f64 {
-    let (output, read, write) = match provider {
-        Provider::Claude => (5.0, 0.1, 1.25),
-        Provider::Codex => (6.0, 0.1, 1.0),
+    let (output, read, write, model) = match provider {
+        Provider::Claude => (5.0, 0.1, 1.25, claude_model_factor(&usage.model)),
+        Provider::Codex => (6.0, 0.1, 1.0, 1.0),
     };
-    usage.input as f64
-        + output * usage.output as f64
-        + read * usage.cache_read as f64
-        + write * usage.cache_write as f64
+    model
+        * (usage.input as f64
+            + output * usage.output as f64
+            + read * usage.cache_read as f64
+            + write * usage.cache_write as f64)
+}
+
+/// The first two numbers after `family-` in a model ID, such as (4, 1) for
+/// "claude-opus-4-1-20250805" or (5, 0) for "claude-sonnet-5". Date suffixes are not versions.
+fn version(model: &str, family: &str) -> Option<(u32, u32)> {
+    let rest = &model[model.find(family)? + family.len()..];
+    let mut parts = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().ok().filter(|_| part.len() <= 2));
+    let major = parts.next()??;
+    Some((major, parts.next().flatten().unwrap_or(0)))
+}
+
+/// A Claude model's API input price relative to $5 per million tokens, the Opus 4.5 to Opus 5
+/// price, so Opus usage keeps its familiar scale. Every listed model keeps the same output, cache
+/// read and cache write ratios, so one factor per model is enough. Unknown models count as 1.
+fn claude_model_factor(model: &str) -> f64 {
+    let model = model.to_ascii_lowercase();
+    if model.contains("fable") || model.contains("mythos") {
+        return 2.0; // $10
+    }
+    if let Some(version) = version(&model, "opus-") {
+        return match version {
+            (4, 0..=1) | (0..=3, _) => 3.0, // $15
+            (5, 5..) | (6.., _) => 0.8,     // $4
+            _ => 1.0,                       // $5
+        };
+    }
+    if let Some((major, _)) = version(&model, "sonnet-") {
+        return if major >= 5 { 0.4 } else { 0.6 }; // $2 or $3
+    }
+    if let Some((major, _)) = version(&model, "haiku-") {
+        return if major >= 5 { 0.02 } else { 0.2 }; // $0.10 or $1
+    }
+    1.0
 }
 
 fn date(at: i64) -> String {
@@ -181,14 +219,62 @@ fn in_scope(window: &str, model: &str) -> bool {
     }
 }
 
-/// Analyses one account's allowance windows against its observed usage.
+/// The baseline rate for each day: from the days in its own plan period (between breaks) when
+/// that period has enough active days, otherwise from the whole range. A plan change resizes the
+/// allowance, so mixing both sides would explain too much on one and too little on the other.
+fn period_rates(dates: &[&String], pairs: &[(f64, f64)], breaks: &[String]) -> Vec<Option<f64>> {
+    let overall = baseline(pairs);
+    let period = |date: &String| breaks.iter().filter(|day| *day <= date).count();
+    let mut rates = BTreeMap::new();
+    for index in dates.iter().map(|date| period(date)) {
+        rates.entry(index).or_insert_with(|| {
+            let own: Vec<(f64, f64)> = dates
+                .iter()
+                .zip(pairs)
+                .filter(|(date, _)| period(date) == index)
+                .map(|(_, pair)| *pair)
+                .collect();
+            baseline(&own).or(overall)
+        });
+    }
+    dates.iter().map(|date| rates[&period(date)]).collect()
+}
+
+/// How sure the current rate is: the active days in the latest plan period and the spread of
+/// their points-per-weight ratios over the efficient half the baseline is fitted on, from the
+/// most efficient day to the median day. Few days or a wide spread mean a rough estimate.
+fn spread(
+    dates: &[&String],
+    pairs: &[(f64, f64)],
+    breaks: &[String],
+) -> (usize, Option<(f64, f64)>) {
+    let latest = breaks
+        .iter()
+        .filter(|day| dates.iter().any(|date| date >= day))
+        .max();
+    let mut ratios: Vec<f64> = dates
+        .iter()
+        .zip(pairs)
+        .filter(|(date, _)| latest.is_none_or(|start| **date >= start))
+        .filter(|(_, (points, weight))| *weight >= MIN_WEIGHTED && *points > 0.0)
+        .map(|(_, (points, weight))| points / weight)
+        .collect();
+    ratios.sort_by(f64::total_cmp);
+    let range = (ratios.len() >= MIN_DAYS).then(|| (ratios[0], ratios[(ratios.len() - 1) / 2]));
+    (ratios.len(), range)
+}
+
+/// Analyses one account's allowance windows against its observed usage. `breaks` are the times
+/// the plan changed; each plan period gets its own baseline rate.
 pub fn analyze(
     provider: Provider,
     labels: &BTreeMap<String, String>,
     readings: &[Reading],
     usage: &[Usage],
     server_days: &BTreeMap<String, i64>,
+    breaks: &[i64],
 ) -> Value {
+    let breaks: Vec<String> = breaks.iter().map(|at| date(*at)).collect();
     let mut sorted = usage.to_vec();
     sorted.sort_by_key(|row| row.at);
     let usage = &sorted[..];
@@ -222,16 +308,25 @@ pub fn analyze(
                 day.3 = true;
             }
         }
+        let dates: Vec<&String> = days.keys().collect();
         let pairs: Vec<(f64, f64)> = days.values().map(|day| (day.0, day.1)).collect();
         let rate = baseline(&pairs);
+        let rates = period_rates(&dates, &pairs, &breaks);
+        let (rate_days, rate_range) = spread(&dates, &pairs, &breaks);
         // Points per dollar only when every active day's usage reported its cost.
-        let cost_pairs: Vec<(f64, f64)> = days
-            .values()
-            .filter(|day| !day.3)
-            .map(|day| (day.0, day.2 * 1e6))
+        let priced: Vec<(&String, (f64, f64))> = days
+            .iter()
+            .filter(|(_, day)| !day.3)
+            .map(|(date, day)| (date, (day.0, day.2 * 1e6)))
             .collect();
         let cost_rate = (provider == Provider::Claude)
-            .then(|| baseline(&cost_pairs))
+            .then(|| {
+                let (dates, pairs): (Vec<&String>, Vec<(f64, f64)>) = priced.into_iter().unzip();
+                period_rates(&dates, &pairs, &breaks)
+                    .last()
+                    .copied()
+                    .flatten()
+            })
             .flatten()
             .map(|rate| rate * 1e6);
         let ratios: Vec<(String, f64)> = days
@@ -242,7 +337,8 @@ pub fn analyze(
         let mut total = (0.0, 0.0, 0.0);
         let day_rows: Vec<Value> = days
             .iter()
-            .map(|(date, day)| {
+            .zip(&rates)
+            .map(|((date, day), rate)| {
                 let explained = rate.map_or(0.0, |rate| (rate * day.1).min(day.0));
                 total.0 += day.0;
                 total.1 += explained;
@@ -259,7 +355,8 @@ pub fn analyze(
         windows.push(json!({
             "id":id,"label":labels.get(id).cloned().unwrap_or_else(|| id.to_owned()),
             "enough":rate.is_some(),"activeDays":ratios.len(),
-            "pointsPerMillion":rate.map(|rate| rate * 1e6),"pointsPerDollar":cost_rate,
+            "pointsPerMillion":rate.and(rates.last().copied().flatten()).map(|rate| rate * 1e6),
+            "rateDays":rate_days,"rateRange":rate_range.map(|(low, high)| [low * 1e6, high * 1e6]),"pointsPerDollar":cost_rate,
             "points":total.0,"explained":total.1,"unattributed":total.0 - total.1,
             "idlePoints":idle_points,"idleSteps":idle.iter().rev().take(500).collect::<Vec<_>>(),
             "change":change_point(&ratios),"days":day_rows,
@@ -312,6 +409,34 @@ pub fn analyze(
 mod tests {
     use super::*;
 
+    #[test]
+    fn claude_tokens_are_scaled_by_model_price() {
+        for (model, factor) in [
+            ("claude-opus-5", 1.0),
+            ("claude-opus-4-8[1m]", 1.0),
+            ("claude-opus-5-5", 0.8),
+            ("claude-opus-4-1-20250805", 3.0),
+            ("claude-opus-4-20250514", 3.0),
+            ("claude-sonnet-5-5", 0.4),
+            ("claude-sonnet-4-6", 0.6),
+            ("claude-haiku-4-5-20251001", 0.2),
+            ("claude-haiku-5-5", 0.02),
+            ("claude-fable-5-1", 2.0),
+            ("", 1.0),
+        ] {
+            assert_eq!(claude_model_factor(model), factor, "{model}");
+        }
+        let usage = |model: &str| Usage {
+            model: model.into(),
+            input: 100,
+            output: 10,
+            ..Default::default()
+        };
+        assert_eq!(weighted(Provider::Claude, &usage("claude-opus-5")), 150.0);
+        assert_eq!(weighted(Provider::Claude, &usage("claude-sonnet-5")), 60.0);
+        assert_eq!(weighted(Provider::Codex, &usage("claude-sonnet-5")), 160.0);
+    }
+
     fn reading(window: &str, at: i64, used: f64) -> Reading {
         Reading {
             window: window.into(),
@@ -359,6 +484,7 @@ mod tests {
             &readings,
             &usage,
             &BTreeMap::new(),
+            &[],
         );
         let window = &result["windows"][0];
         assert_eq!(window["label"], "7-day");
@@ -392,6 +518,7 @@ mod tests {
             &readings,
             &usage,
             &BTreeMap::new(),
+            &[],
         );
         let windows = result["windows"].as_array().unwrap();
         assert_eq!(windows[0]["id"], "seven_day");
@@ -428,6 +555,7 @@ mod tests {
             &readings,
             &usage,
             &BTreeMap::from([("1970-01-01".to_owned(), 900_000)]),
+            &[],
         );
         let window = &result["windows"][0];
         assert_eq!(window["points"], 16.0);
@@ -439,5 +567,46 @@ mod tests {
             result["serverVsLocal"][0],
             json!({"date":"1970-01-01","server":900_000,"local":200_000})
         );
+    }
+
+    #[test]
+    fn a_plan_change_gives_each_period_its_own_baseline() {
+        let mut readings = Vec::new();
+        let mut usage = Vec::new();
+        for day in 0..8_i64 {
+            let base = day * DAY;
+            // A smaller plan from day four: each point needs only half the tokens.
+            let tokens = if day >= 4 { 50_000 } else { 100_000 };
+            for (step, used) in [(0, 0.0), (1, 1.0), (2, 2.0)] {
+                readings.push(Reading {
+                    window: "weekly".into(),
+                    at: base + step * 600,
+                    used,
+                    resets_at: Some(base + DAY),
+                });
+                if step > 0 {
+                    usage.push(input(base + step * 600 - 1, tokens, 0));
+                }
+            }
+        }
+        let analyze = |breaks: &[i64]| {
+            analyze(
+                Provider::Codex,
+                &BTreeMap::new(),
+                &readings,
+                &usage,
+                &BTreeMap::new(),
+                breaks,
+            )
+        };
+        let mixed = &analyze(&[])["windows"][0];
+        assert!((mixed["unattributed"].as_f64().unwrap() - 4.0).abs() < 1e-9);
+        let split = &analyze(&[4 * DAY + 3600])["windows"][0];
+        assert!(split["unattributed"].as_f64().unwrap().abs() < 1e-9);
+        assert!((split["pointsPerMillion"].as_f64().unwrap() - 20.0).abs() < 1e-9);
+        assert_eq!(split["rateDays"], 4);
+        assert_eq!(split["rateRange"], json!([20.0, 20.0]));
+        assert_eq!(mixed["rateDays"], 8);
+        assert_eq!(mixed["rateRange"], json!([10.0, 10.0]));
     }
 }

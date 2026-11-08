@@ -11,12 +11,27 @@ Notable changes to the m-dash desktop app. The format follows
   for deploying your own relay, creating and joining a usage channel, and
   setting up a Claude cloud environment, with checks and how to undo it.
 - Allowance vs tokens has a **7 / 28 / 90 days** range. The choice is remembered.
+- **Plan changes and notes** on Allowance vs tokens. m-dash records when an
+  account's plan changes (and recovers the last 30 days of Codex plan history),
+  and you can add plan changes it can't see, such as moving between price tiers
+  that report the same plan name, or plain notes. Each plan period gets its own
+  baseline rate, and a rate shift near a plan change or note says so instead of
+  showing a warning. Notes appear as marks on the daily chart.
+- Each learned rate on Allowance vs tokens says how far to trust it (good, fair
+  or rough estimate, from the days it rests on and how much the efficient days
+  vary). Codex and Claude allowance bars on the Overview also say what the
+  allowance left is worth at that rate, such as "≈ 4.5M weighted tokens (about
+  $56 of API-priced usage) left at your learned rate".
 
 ### Changed
 - Allowance vs tokens now says "explained by observed usage" and names where
   that usage came from (this computer, your other computers, cloud sessions),
   since usage shared over the usage channel already counted. Before, it said
   "tokens on this computer" even when it wasn't only this computer.
+- Allowance vs tokens weighs Claude usage by each model's API price, so an Opus
+  token counts more than a Sonnet or Haiku token. Before, every Claude model
+  counted the same, which made days heavy in subagents or Haiku look like
+  unexplained burn. Codex models are still counted alike.
 - Relays no longer have to be on Cloudflare `workers.dev`. m-dash accepts any
   public HTTPS relay address (still no path, port, IP address or localhost), and
   the guide lists the relay's contract for hosting it elsewhere. A relay is never

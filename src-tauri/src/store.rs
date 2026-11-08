@@ -7,6 +7,31 @@ const DAY: u64 = 86_400;
 pub const LEDGER_DAYS: [u64; 3] = [7, 28, 90];
 
 pub struct Store(Connection);
+
+/// Records the account's plan when it differs from the last one recorded, so the ledger can
+/// date plan changes. Missing or empty plans record nothing.
+fn record_plan(db: &Connection, account: &str, at: i64, plan: Option<&str>) -> Result<(), String> {
+    let Some(plan) = plan.filter(|plan| !plan.is_empty()) else {
+        return Ok(());
+    };
+    let error = |_| "Cannot save plan history.".to_string();
+    let last: Option<String> = db
+        .query_row(
+            "SELECT text FROM ledger_marks WHERE account=?1 AND kind='plan' AND source='auto' AND at<=?2 ORDER BY at DESC LIMIT 1",
+            params![account, at],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if last.as_deref() != Some(plan) {
+        db.execute(
+            "INSERT OR IGNORE INTO ledger_marks VALUES (?1,?2,'plan','auto',?3)",
+            params![account, at, plan],
+        )
+        .map_err(error)?;
+    }
+    Ok(())
+}
 impl Store {
     pub fn claude_ping(&self) -> Result<crate::claude_ping::State, String> {
         let value: Option<String> = self
@@ -84,6 +109,7 @@ impl Store {
             ON CONFLICT(account) DO UPDATE SET quota=excluded.quota,quota_at=excluded.quota_at,updated_at=excluded.updated_at,plan=COALESCE(excluded.plan,claude_account_usage.plan)
             WHERE excluded.quota_at>=claude_account_usage.quota_at",
             params![account,snapshot["windows"].to_string(),at as i64,now as i64,snapshot["plan"].as_str()]).map_err(|_|"Cannot save Claude account usage.")?;
+        record_plan(&transaction, account, at as i64, snapshot["plan"].as_str())?;
         transaction.execute("INSERT INTO settings (key,value) VALUES ('claude-current-account',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[account]).map_err(|_|"Cannot save Claude account selection.")?;
         transaction
             .commit()
@@ -338,8 +364,18 @@ impl Store {
             CREATE TABLE IF NOT EXISTS limit_readings (account TEXT NOT NULL, window TEXT NOT NULL, observed_at INTEGER NOT NULL, used_percent REAL NOT NULL,
                 resets_at INTEGER, PRIMARY KEY(account,window,observed_at));
             CREATE TABLE IF NOT EXISTS limit_events (account TEXT NOT NULL, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(account,occurred_at,kind));
-            CREATE TABLE IF NOT EXISTS log_cursors (provider TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(provider,path));")
+            CREATE TABLE IF NOT EXISTS log_cursors (provider TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(provider,path));
+            CREATE TABLE IF NOT EXISTS ledger_marks (account TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL,
+                PRIMARY KEY(account,at,kind,source));")
             .map_err(|_| "Cannot initialize local usage history.")?;
+        // Plans seen before plan changes were recorded: the last 30 days of Codex observations.
+        db.execute("INSERT OR IGNORE INTO ledger_marks SELECT account,observed_at,'plan','auto',plan FROM
+            (SELECT account,observed_at,plan,LAG(plan) OVER (PARTITION BY account ORDER BY observed_at) AS previous FROM
+                (SELECT account,observed_at,json_extract(resources,'$.plan') AS plan FROM observations WHERE json_valid(resources)
+                    AND json_extract(resources,'$.plan')!='')) AS seen
+            WHERE (previous IS NULL OR previous!=plan)
+                AND NOT EXISTS (SELECT 1 FROM ledger_marks WHERE ledger_marks.account=seen.account AND kind='plan' AND source='auto')", [])
+            .map_err(|_| "Cannot initialize plan history.")?;
         Ok(Self(db))
     }
     pub fn save(&mut self, snapshot: &Value) -> Result<(), String> {
@@ -365,6 +401,7 @@ impl Store {
                 params![account, time, resources.to_string()],
             )
             .map_err(|_| "Cannot save account observation.")?;
+        record_plan(&transaction, account, time, snapshot["plan"].as_str())?;
         for (window, used, resets_at) in crate::usage::windows(snapshot) {
             transaction
                 .execute(
@@ -541,11 +578,89 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(error)?;
-        let mut result = crate::burn::analyze(provider, &labels, &readings, &usage, &server);
+        let marks = self.ledger_marks(account, since)?;
+        let breaks: Vec<i64> = marks
+            .iter()
+            .filter(|mark| mark["kind"] == "plan")
+            .filter_map(|mark| mark["at"].as_i64())
+            .collect();
+        let mut result =
+            crate::burn::analyze(provider, &labels, &readings, &usage, &server, &breaks);
+        result["marks"] = json!(marks);
         result["account"] = json!(account);
         result["days"] = json!(days);
         result["limitHits"] = json!(limit_hits);
         Ok(result)
+    }
+
+    /// Plan changes and the owner's notes since `since`. Recorded plans become changes only after
+    /// the first one, which is the plan m-dash first saw rather than a change.
+    fn ledger_marks(&self, account: &str, since: i64) -> Result<Vec<Value>, String> {
+        let error = |_| "Cannot read plan changes and notes.".to_string();
+        let mut query = self
+            .0
+            .prepare("SELECT at,kind,source,text FROM ledger_marks WHERE account=?1 ORDER BY at")
+            .map_err(error)?;
+        let rows = query
+            .query_map([account], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let mut previous: Option<String> = None;
+        let mut marks = Vec::new();
+        for (at, kind, source, text) in rows {
+            let shown = if source == "auto" {
+                let change = previous
+                    .replace(text.clone())
+                    .map(|from| format!("Plan changed from {from} to {text}"));
+                let Some(change) = change else { continue };
+                change
+            } else {
+                text
+            };
+            if at >= since {
+                marks.push(json!({"at":at,"kind":kind,"source":source,"text":shown}));
+            }
+        }
+        Ok(marks)
+    }
+
+    /// Adds the owner's note, or a plan change m-dash could not see, on a day of the ledger.
+    pub fn add_ledger_mark(
+        &self,
+        account: &str,
+        at: i64,
+        plan: bool,
+        text: &str,
+    ) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > 200 {
+            return Err("Write a note of up to 200 characters.".into());
+        }
+        self.0
+            .execute(
+                "INSERT INTO ledger_marks VALUES (?1,?2,?3,'manual',?4) ON CONFLICT DO UPDATE SET text=excluded.text",
+                params![account, at, if plan { "plan" } else { "note" }, text],
+            )
+            .map_err(|_| "Cannot save the note.")?;
+        Ok(())
+    }
+
+    pub fn remove_ledger_mark(&self, account: &str, at: i64, kind: &str) -> Result<(), String> {
+        self.0
+            .execute(
+                "DELETE FROM ledger_marks WHERE account=?1 AND at=?2 AND kind=?3 AND source='manual'",
+                params![account, at, kind],
+            )
+            .map_err(|_| "Cannot remove the note.")?;
+        Ok(())
     }
 
     /// The saved Allowance vs tokens range, 28 days unless 7 or 90 was chosen.
@@ -1112,6 +1227,44 @@ mod tests {
         );
         assert_eq!(store.unshared_usage("other", 10).unwrap().1.len(), 3);
         assert_eq!(store.relay_cursor("other").unwrap(), 0);
+    }
+
+    #[test]
+    fn plan_changes_and_notes_mark_the_ledger() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let now = crate::collector::now() as i64;
+        let snapshot = |at: i64, plan: &str| json!({"accountId":"codex:one","observedAt":at,"plan":plan,"windows":[]});
+        // Observations saved before plan history existed are backfilled on open.
+        store.save(&snapshot(now - 3 * 86_400, "pro")).unwrap();
+        store.save(&snapshot(now - 2 * 86_400, "plus")).unwrap();
+        store.0.execute("DELETE FROM ledger_marks", []).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        store.save(&snapshot(now - 86_400, "plus")).unwrap();
+        store.save(&snapshot(now - 3600, "pro")).unwrap();
+        store
+            .add_ledger_mark("codex:one", now - 86_400, false, " Started a big refactor ")
+            .unwrap();
+        assert!(store.add_ledger_mark("codex:one", now, true, " ").is_err());
+        let marks = store.ledger_marks("codex:one", now - 30 * 86_400).unwrap();
+        let texts: Vec<&str> = marks
+            .iter()
+            .map(|mark| mark["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Plan changed from pro to plus",
+                "Started a big refactor",
+                "Plan changed from plus to pro"
+            ]
+        );
+        store
+            .remove_ledger_mark("codex:one", now - 86_400, "note")
+            .unwrap();
+        assert_eq!(store.ledger_marks("codex:one", 0).unwrap().len(), 2);
     }
 
     #[test]
