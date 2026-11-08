@@ -6,6 +6,12 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The **API price** column on Allowance vs tokens shows "—" for usage whose
+  source reports no price, such as terminal sessions read from session logs,
+  and marks partly priced rows with "+". Before, those rows showed $0.00, which
+  read as free.
+
 ## [0.5.4-rc.2] - 2026-11-08
 
 ### Fixed
