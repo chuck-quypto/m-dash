@@ -488,11 +488,21 @@ fn ledger_account(inner: &Inner, provider: &str) -> Result<String, String> {
 
 /// Midnight UTC of a YYYY-MM-DD date, the day boundary the ledger uses.
 fn ledger_day(date: &str) -> Result<i64, String> {
-    let format = time::format_description::parse("[year]-[month]-[day]")
-        .map_err(|_| "Choose a valid date.")?;
-    time::Date::parse(date, &format)
+    let invalid = || "Choose a valid date.".to_string();
+    let mut parts = date.splitn(3, '-').map(|part| part.parse::<i32>().ok());
+    let (Some(Some(year)), Some(Some(month)), Some(Some(day))) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(invalid());
+    };
+    let month = u8::try_from(month)
+        .ok()
+        .and_then(|month| time::Month::try_from(month).ok())
+        .ok_or_else(invalid)?;
+    let day = u8::try_from(day).map_err(|_| invalid())?;
+    time::Date::from_calendar_date(year, month, day)
         .map(|day| day.midnight().assume_utc().unix_timestamp())
-        .map_err(|_| "Choose a valid date.".into())
+        .map_err(|_| invalid())
 }
 
 #[tauri::command]
