@@ -27,7 +27,7 @@ Claude and ChatGPT chat apps, and mobile apps. Those don't export per-request
 usage, so they stay unattributed. Codex cloud usage still appears in the
 account-wide daily totals that Codex reports.
 
-**Requirements:** m-dash 0.5.4 or later on Windows or macOS (Linux builds can't
+**Requirements:** m-dash 0.5.4-rc.1 or later (0.6.0 adds computer names) on Windows or macOS (Linux builds can't
 store the channel secret), a Cloudflare account, and Node.js 20 or later on the
 computer you deploy from. Read [privacy and storage](PRIVACY.md) first. The relay
 keeps per-request token counts, model and request identifiers for 14 days, and
