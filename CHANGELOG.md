@@ -6,6 +6,12 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+## [0.6.0-rc.1] - 2026-11-08
+
+First release candidate for 0.6.0, which turns m-dash from a per-computer
+monitor into an account ledger: how much allowance your tokens use, where they
+ran, and how far to trust the estimate.
+
 ### Added
 - A step-by-step guide, [Cloud sessions and other computers](docs/CLOUD_USAGE.md),
   for deploying your own relay, creating and joining a usage channel, and
@@ -187,7 +193,8 @@ First public release. Targets Windows x64 and Apple Silicon macOS.
 - Android, encrypted mobile sync and the relay are experimental and are not part
   of this release.
 
-[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.2...HEAD
+[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.6.0-rc.1...HEAD
+[0.6.0-rc.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.2...v0.6.0-rc.1
 [0.5.4-rc.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.1...v0.5.4-rc.2
 [0.5.4-rc.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...v0.5.4-rc.1
 [0.5.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.1...v0.5.2

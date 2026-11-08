@@ -1,6 +1,6 @@
 {
   "target": "x86_64-pc-windows-msvc",
-  "cargoLockSha256": "78ae8904b04c880a2b12df3a9f151ef8e72298b5120f71313d6dbbd78ad1fac2",
+  "cargoLockSha256": "05b3fdc11605021ea626040002d5b403933fb518bbb6fea493da51e75f3b2435",
   "packages": [
     {
       "name": "adler2",
