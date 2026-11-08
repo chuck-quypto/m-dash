@@ -51,6 +51,13 @@ window.__TAURI_INTERNALS__={
     if(command==='get_dashboard'||command==='refresh_dashboard')return structuredClone(state());
     if(command==='get_compact_dashboard')return compactRows();
     if(command==='usage_relay_status'||command==='sync_relay')return null;
+    if(command==='usage_list'){
+      if(args.csv)return {csv:'time_utc,where\n',total:1,truncated:false};
+      const places=['cli','desktop','cloud','other:cli@Studio Mac'];
+      const rows=Array.from({length:12},(_,i)=>({at:now()-i*420,where:places[i%4],model:i%3?'claude-opus-5-5':'claude-haiku-5-5',purpose:i%3?'repl_main_thread':'subagent',input:1200+i*40,output:800+i*13,cacheRead:90000+i*1000,cacheWrite:3000,costMicros:i%4===0?null:41000+i*900}))
+        .filter(row=>(!args.filter.where||row.where===args.filter.where)&&(!args.filter.model||row.model===args.filter.model));
+      return {rows,steps:[{window:'seven_day',at:now()-1300,used:42,previous:41},{window:'five_hour',at:now()-2900,used:56,previous:55}],total:rows.length,page:0,pageSize:100,choices:{where:places,model:['claude-haiku-5-5','claude-opus-5-5'],purpose:['repl_main_thread','subagent']}};
+    }
     if(command==='set_device_name'){deviceName=args.name;return structuredClone(state());}
     if(command==='add_ledger_mark'||command==='remove_ledger_mark')return structuredClone(state());
     if(command==='set_ledger_days'){ledgerRange=args.days;return structuredClone(state());}

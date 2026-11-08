@@ -8,6 +8,26 @@ pub const LEDGER_DAYS: [u64; 3] = [7, 28, 90];
 
 pub struct Store(Connection);
 
+/// Where a usage row ran, as the ledger and usage list name it: this computer's surface, "cloud",
+/// or "other:<surface>" with "@<name>" once the sending computer has announced its name.
+const WHERE: &str = "CASE WHEN source='relay' AND surface!='cloud' THEN 'other:'||surface||COALESCE('@'||(SELECT name FROM devices WHERE devices.origin=usage_events.origin),'') ELSE surface END";
+
+/// Filters for the usage list. Empty fields match everything.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UsageFilter {
+    pub days: u64,
+    /// One UTC day, YYYY-MM-DD, instead of the last `days`.
+    pub date: String,
+    #[serde(rename = "where")]
+    pub place: String,
+    pub model: String,
+    pub purpose: String,
+    pub page: u64,
+}
+
+const PAGE: u64 = 100;
+
 /// Records the account's plan when it differs from the last one recorded, so the ledger can
 /// date plan changes. Missing or empty plans record nothing.
 fn record_plan(db: &Connection, account: &str, at: i64, plan: Option<&str>) -> Result<(), String> {
@@ -546,7 +566,7 @@ impl Store {
             .into_iter()
             .filter(|reading| labels.contains_key(&reading.window))
             .collect::<Vec<_>>();
-        let mut query = self.0.prepare("SELECT occurred_at,CASE WHEN source='relay' AND surface!='cloud' THEN 'other:'||surface||COALESCE('@'||(SELECT name FROM devices WHERE devices.origin=usage_events.origin),'') ELSE surface END,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
+        let mut query = self.0.prepare(&format!("SELECT occurred_at,{WHERE},COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at")).map_err(error)?;
         let usage = query
             .query_map(params![account, since], |row| {
                 Ok(crate::burn::Usage {
@@ -746,6 +766,153 @@ impl Store {
             )
             .map_err(error)?;
         Ok(json!({"others":others,"cloudLastUsage":cloud}))
+    }
+
+    /// One page of an account's usage rows, newest first, with the allowance steps in the same
+    /// span, the filter choices available and, with `csv`, every matching row instead of a page.
+    pub fn usage_list(
+        &self,
+        account: &str,
+        filter: &UsageFilter,
+        now: u64,
+        csv: bool,
+    ) -> Result<Value, String> {
+        let error = |_| "Cannot read the usage list.".to_string();
+        let (from, to) = if filter.date.is_empty() {
+            let days = if LEDGER_DAYS.contains(&filter.days) {
+                filter.days
+            } else {
+                28
+            };
+            (now.saturating_sub(days * DAY) as i64, i64::MAX)
+        } else {
+            let day: i64 = self
+                .0
+                .query_row("SELECT unixepoch(?1)", [&filter.date], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })
+                .map_err(error)?
+                .ok_or("Choose a valid date.")?;
+            (day, day + DAY as i64)
+        };
+        let matching = format!(
+            "FROM usage_events WHERE account=?1 AND occurred_at>=?2 AND occurred_at<?3
+            AND (?4='' OR {WHERE}=?4) AND (?5='' OR COALESCE(model,'')=?5) AND (?6='' OR COALESCE(query_source,'')=?6)"
+        );
+        let params = params![
+            account,
+            from,
+            to,
+            filter.place,
+            filter.model,
+            filter.purpose
+        ];
+        let total: i64 = self
+            .0
+            .query_row(&format!("SELECT COUNT(*) {matching}"), params, |row| {
+                row.get(0)
+            })
+            .map_err(error)?;
+        let (limit, offset) = if csv {
+            (20_000, 0)
+        } else {
+            (PAGE as i64, (filter.page * PAGE) as i64)
+        };
+        let mut query = self
+            .0
+            .prepare(&format!(
+                "SELECT occurred_at,{WHERE},COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros
+                {matching} ORDER BY occurred_at DESC,rowid DESC LIMIT {limit} OFFSET {offset}"
+            ))
+            .map_err(error)?;
+        let rows = query
+            .query_map(params, |row| {
+                Ok(json!({"at":row.get::<_, i64>(0)?,"where":row.get::<_, String>(1)?,"model":row.get::<_, String>(2)?,
+                    "purpose":row.get::<_, String>(3)?,"input":row.get::<_, i64>(4)?,"output":row.get::<_, i64>(5)?,
+                    "cacheRead":row.get::<_, i64>(6)?,"cacheWrite":row.get::<_, i64>(7)?,"costMicros":row.get::<_, Option<i64>>(8)?}))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        if csv {
+            let mut text = String::from(
+                "time_utc,where,model,purpose,input,output,cache_read,cache_write,api_price_usd\n",
+            );
+            let quote = |value: &Value| {
+                format!(
+                    "\"{}\"",
+                    value.as_str().unwrap_or_default().replace('"', "\"\"")
+                )
+            };
+            for row in &rows {
+                let time = time::OffsetDateTime::from_unix_timestamp(
+                    row["at"].as_i64().unwrap_or_default(),
+                )
+                .ok()
+                .and_then(|time| {
+                    time.format(&time::format_description::well_known::Rfc3339)
+                        .ok()
+                })
+                .unwrap_or_default();
+                let price = row["costMicros"]
+                    .as_i64()
+                    .map(|micros| format!("{:.6}", micros as f64 / 1e6))
+                    .unwrap_or_default();
+                text.push_str(&format!(
+                    "{time},{},{},{},{},{},{},{},{price}\n",
+                    quote(&row["where"]),
+                    quote(&row["model"]),
+                    quote(&row["purpose"]),
+                    row["input"],
+                    row["output"],
+                    row["cacheRead"],
+                    row["cacheWrite"]
+                ));
+            }
+            return Ok(json!({"csv":text,"total":total,"truncated":total > rows.len() as i64}));
+        }
+        // Allowance steps in the page's span: each reading that moved up from the one before it.
+        let span = (
+            rows.last()
+                .and_then(|row| row["at"].as_i64())
+                .unwrap_or(from),
+            rows.first()
+                .and_then(|row| row["at"].as_i64())
+                .unwrap_or(now as i64),
+        );
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT window,observed_at,used_percent,previous FROM (SELECT window,observed_at,used_percent,
+                LAG(used_percent) OVER (PARTITION BY window ORDER BY observed_at) AS previous FROM limit_readings WHERE account=?1 AND observed_at>=?2-86400 AND observed_at<=?3)
+                WHERE observed_at>=?2 AND previous IS NOT NULL AND used_percent>previous ORDER BY observed_at DESC LIMIT 500",
+            )
+            .map_err(error)?;
+        let steps = query
+            .query_map(params![account, span.0, span.1 + 600], |row| {
+                Ok(json!({"window":row.get::<_, String>(0)?,"at":row.get::<_, i64>(1)?,"used":row.get::<_, f64>(2)?,"previous":row.get::<_, f64>(3)?}))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let choices = |column: &str| -> Result<Vec<String>, String> {
+            let mut query = self
+                .0
+                .prepare(&format!(
+                    "SELECT DISTINCT {column} AS value FROM usage_events WHERE account=?1 AND occurred_at>=?2 AND occurred_at<?3 ORDER BY value"
+                ))
+                .map_err(error)?;
+            let values = query
+                .query_map(params![account, from, to], |row| row.get::<_, String>(0))
+                .map_err(error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(error)?;
+            Ok(values)
+        };
+        Ok(
+            json!({"rows":rows,"steps":steps,"total":total,"page":filter.page,"pageSize":PAGE,
+            "choices":{"where":choices(WHERE)?,"model":choices("COALESCE(model,'')")?,"purpose":choices("COALESCE(query_source,'')")?}}),
+        )
     }
 
     /// The saved Allowance vs tokens range, 28 days unless 7 or 90 was chosen.
@@ -1350,6 +1517,101 @@ mod tests {
             .remove_ledger_mark("codex:one", now - 86_400, "note")
             .unwrap();
         assert_eq!(store.ledger_marks("codex:one", 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn usage_list_filters_pages_and_shows_allowance_steps() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let now = 1_800_000_000_u64;
+        let at = now as i64 - 3600;
+        for index in 0..150 {
+            let request = crate::usage::Request {
+                surface: if index % 2 == 0 { "cli" } else { "desktop" }.into(),
+                model: Some("claude-opus-5-5".into()),
+                query_source: Some("main".into()),
+                input: index,
+                ..Default::default()
+            };
+            insert_usage(
+                &store.0,
+                "claude:one",
+                "otel",
+                &format!("r{index}"),
+                at + index,
+                &request,
+            )
+            .unwrap();
+        }
+        store
+            .save(&json!({"accountId":"claude:one","observedAt":at,"windows":[{"id":"seven_day","usedPercent":40.0,"remainingPercent":60.0,"resetsAt":now+9000}]}))
+            .unwrap();
+        store
+            .save(&json!({"accountId":"claude:one","observedAt":at+100,"windows":[{"id":"seven_day","usedPercent":41.0,"remainingPercent":59.0,"resetsAt":now+9000}]}))
+            .unwrap();
+        let list =
+            |filter: UsageFilter| store.usage_list("claude:one", &filter, now, false).unwrap();
+        let all = list(UsageFilter {
+            days: 7,
+            ..Default::default()
+        });
+        assert_eq!(all["total"], 150);
+        assert_eq!(all["rows"].as_array().unwrap().len(), 100);
+        assert_eq!(all["rows"][0]["input"], 149);
+        assert_eq!(all["choices"]["where"], json!(["cli", "desktop"]));
+        assert_eq!(all["steps"][0]["used"], 41.0);
+        let second = list(UsageFilter {
+            days: 7,
+            page: 1,
+            ..Default::default()
+        });
+        assert_eq!(second["rows"].as_array().unwrap().len(), 50);
+        let cli = list(UsageFilter {
+            days: 7,
+            place: "cli".into(),
+            ..Default::default()
+        });
+        assert_eq!(cli["total"], 75);
+        let day = time::OffsetDateTime::from_unix_timestamp(at)
+            .unwrap()
+            .date()
+            .to_string();
+        assert_eq!(
+            list(UsageFilter {
+                date: day,
+                ..Default::default()
+            })["total"],
+            150
+        );
+        assert!(store
+            .usage_list(
+                "claude:one",
+                &UsageFilter {
+                    date: "nope".into(),
+                    ..Default::default()
+                },
+                now,
+                false
+            )
+            .is_err());
+        let csv = store
+            .usage_list(
+                "claude:one",
+                &UsageFilter {
+                    days: 7,
+                    ..Default::default()
+                },
+                now,
+                true,
+            )
+            .unwrap();
+        let text = csv["csv"].as_str().unwrap();
+        assert_eq!(text.lines().count(), 151);
+        assert!(text
+            .lines()
+            .nth(2)
+            .unwrap()
+            .contains(",\"cli\",\"claude-opus-5-5\",\"main\",148,"));
     }
 
     #[test]
