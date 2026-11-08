@@ -201,8 +201,13 @@ running don't change.
 2. In m-dash, click **Refresh accounts**, which syncs the relay right away.
 3. Open **Allowance vs tokens → Claude → Observed usage**. A row with
    **Where = Cloud session** means everything works. That row is always listed,
-   however small. Usage from your other computers shows as
-   **Other computer · Terminal** (or **· Desktop app**), and is always listed too.
+   however small. Usage from your other computers shows under each computer's
+   name, such as **Studio Mac · Terminal** (or **Other computer · Terminal** for
+   one on an m-dash version before 0.6.0), and is always listed too.
+4. **Computers and coverage**, at the top of the same page, lists each computer
+   on the channel with its last usage and whether its local session logs and
+   Claude feed are on, and when a cloud session last reported. Rename this
+   computer there; the others see the new name within a day.
 
 If no row appears after a refresh:
 

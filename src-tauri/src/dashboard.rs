@@ -27,6 +27,10 @@ pub struct Dashboard {
     pub consistency: Value,
     /// Days of history the burn ledgers cover: 7, 28 or 90.
     pub ledger_days: u64,
+    /// This computer's channel name, the other computers on the channel and cloud reporting.
+    pub computers: Value,
+    /// Whether this computer is on a usage channel, as of the last refresh.
+    pub usage_channel: bool,
     pub usage_relay_error: Option<String>,
 }
 

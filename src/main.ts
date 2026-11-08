@@ -3,7 +3,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
-import { consistencyPage, ledgerCsv, remainingWorth, type Ledgers } from './consistency';
+import { consistencyPage, ledgerCsv, remainingWorth, type Computers, type Ledgers } from './consistency';
 import { alertMark, alertSentence, timeLeftSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
@@ -33,6 +33,8 @@ interface Dashboard {
   forecasts: Forecast[];
   consistency: Ledgers;
   ledgerDays?: number;
+  computers?: Computers;
+  usageChannel?: boolean;
   usageRelayError: string | null;
 }
 interface Forecast {
@@ -264,7 +266,7 @@ function render() {
     <nav aria-label="Dashboard views">${(['overview', 'history', 'consistency', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'consistency' ? 'Allowance vs tokens' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
     ${appError ? `<div class="error" role="alert">${escape(appError)}</div>` : ''}
     ${state.settings.providers.codex && state.error ? `<div class="error" role="status"><strong>Couldn’t refresh Codex.</strong> ${escape(state.error)}${state.snapshot ? ' Showing the last successful observation.' : ''}</div>` : ''}
-    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? noticeLine('ledger') + consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled, state.ledgerDays || 28) : connections()}
+    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? noticeLine('ledger') + consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled, state.ledgerDays || 28, state.computers ?? {}, state.usageChannel ?? false) : connections()}
     <footer><span>m-dash ${escape(appVersion)} · Use the tray to open, refresh or quit</span><span>${state.nextRefresh ? `Next refresh ${dateTime(state.nextRefresh)}` : enabledCount ? 'Connect an account to collect readings' : 'Collection paused'}</span></footer></main>`;
   root.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => { void refresh(); });
   root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; render(); }));
@@ -280,6 +282,7 @@ function render() {
   root.querySelector<HTMLButtonElement>('#usage-relay-leave')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: false }, 'This computer left the usage channel. Shared rows already received are kept.'); });
   root.querySelector<HTMLButtonElement>('#usage-relay-delete')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: true }, 'Channel deleted from the relay. Other computers and cloud sessions can no longer use it.'); });
   const ledgerAction = (command: string, args: Record<string, unknown>) => { void invoke<Dashboard>(command, args).then(next => { state = next; setNotice('ledger', ''); render(); }, error => { setNotice('ledger', String(error)); render(); }); };
+  root.querySelector<HTMLButtonElement>('#device-name-save')?.addEventListener('click', () => { ledgerAction('set_device_name', { name: root.querySelector<HTMLInputElement>('#device-name')!.value }); });
   root.querySelectorAll<HTMLButtonElement>('[data-ledger-add]').forEach(button => button.addEventListener('click', () => {
     const provider = button.dataset.ledgerAdd!;
     ledgerAction('add_ledger_mark', { provider, date: root.querySelector<HTMLInputElement>(`#ledger-date-${provider}`)!.value, plan: root.querySelector<HTMLInputElement>(`#ledger-plan-${provider}`)!.checked, text: root.querySelector<HTMLInputElement>(`#ledger-text-${provider}`)!.value });

@@ -22,6 +22,13 @@ Notable changes to the m-dash desktop app. The format follows
   vary). Codex and Claude allowance bars on the Overview also say what the
   allowance left is worth at that rate, such as "≈ 4.5M weighted tokens (about
   $56 of API-priced usage) left at your learned rate".
+- **Computers and coverage** on Allowance vs tokens lists this computer and the
+  others on your usage channel by name, with when each last reported usage and
+  whether its local session logs and Claude feed are on, plus when a Claude
+  cloud session last reported and what m-dash can't see. Name this computer
+  there; it tells the others once a day. Observed usage shows that name, such as
+  "Studio Mac · Terminal", instead of "Other computer". No relay update needed;
+  computers on older m-dash versions stay "Other computer".
 
 ### Changed
 - Allowance vs tokens now says "explained by observed usage" and names where

@@ -365,9 +365,19 @@ impl Store {
                 resets_at INTEGER, PRIMARY KEY(account,window,observed_at));
             CREATE TABLE IF NOT EXISTS limit_events (account TEXT NOT NULL, occurred_at INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(account,occurred_at,kind));
             CREATE TABLE IF NOT EXISTS log_cursors (provider TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(provider,path));
+            CREATE TABLE IF NOT EXISTS devices (origin TEXT PRIMARY KEY, name TEXT NOT NULL, details TEXT NOT NULL, announced_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS ledger_marks (account TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL,
                 PRIMARY KEY(account,at,kind,source));")
             .map_err(|_| "Cannot initialize local usage history.")?;
+        // Which computer sent each shared row, so usage can be named by computer.
+        let has_origin: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('usage_events') WHERE name='origin'")
+            .and_then(|mut query| query.exists([]))
+            .map_err(|_| "Cannot initialize local usage history.")?;
+        if !has_origin {
+            db.execute("ALTER TABLE usage_events ADD COLUMN origin TEXT", [])
+                .map_err(|_| "Cannot initialize local usage history.")?;
+        }
         // Plans seen before plan changes were recorded: the last 30 days of Codex observations.
         db.execute("INSERT OR IGNORE INTO ledger_marks SELECT account,observed_at,'plan','auto',plan FROM
             (SELECT account,observed_at,plan,LAG(plan) OVER (PARTITION BY account ORDER BY observed_at) AS previous FROM
@@ -536,7 +546,7 @@ impl Store {
             .into_iter()
             .filter(|reading| labels.contains_key(&reading.window))
             .collect::<Vec<_>>();
-        let mut query = self.0.prepare("SELECT occurred_at,CASE WHEN source='relay' AND surface!='cloud' THEN 'other:'||surface ELSE surface END,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
+        let mut query = self.0.prepare("SELECT occurred_at,CASE WHEN source='relay' AND surface!='cloud' THEN 'other:'||surface||COALESCE('@'||(SELECT name FROM devices WHERE devices.origin=usage_events.origin),'') ELSE surface END,COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at").map_err(error)?;
         let usage = query
             .query_map(params![account, since], |row| {
                 Ok(crate::burn::Usage {
@@ -661,6 +671,81 @@ impl Store {
             )
             .map_err(|_| "Cannot remove the note.")?;
         Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>, String> {
+        self.0
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|_| "Cannot read a saved setting.".into())
+    }
+
+    pub fn save_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        self.0
+            .execute("INSERT INTO settings (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])
+            .map_err(|_| "Cannot save a setting.")?;
+        Ok(())
+    }
+
+    /// Notes which computer sent each shared row and saves other computers' announcements.
+    pub fn relay_details(
+        &mut self,
+        origins: &[(String, String, String)],
+        devices: &[crate::usage_relay::Announced],
+    ) -> Result<(), String> {
+        let error = |_| "Cannot save shared computer details.".to_string();
+        let transaction = self.0.transaction().map_err(error)?;
+        for (account, key, origin) in origins {
+            transaction
+                .execute(
+                    "UPDATE usage_events SET origin=?3 WHERE account=?1 AND key=?2 AND source='relay'",
+                    params![account, key, origin],
+                )
+                .map_err(error)?;
+        }
+        for device in devices {
+            transaction
+                .execute(
+                    "INSERT INTO devices VALUES (?1,?2,?3,?4) ON CONFLICT(origin) DO UPDATE SET name=excluded.name,
+                    details=excluded.details,announced_at=excluded.announced_at WHERE excluded.announced_at>=devices.announced_at",
+                    params![device.origin, device.name, device.details, device.at],
+                )
+                .map_err(error)?;
+        }
+        transaction.commit().map_err(error)
+    }
+
+    /// The computers and cloud sessions that report usage to this one: each other computer's
+    /// name, setup and last usage, and when a cloud session last reported.
+    pub fn computers(&self) -> Result<Value, String> {
+        let error = |_| "Cannot read shared computers.".to_string();
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT origin,name,details,announced_at,(SELECT MAX(occurred_at) FROM usage_events WHERE usage_events.origin=devices.origin) FROM devices
+                UNION ALL SELECT origin,NULL,NULL,NULL,MAX(occurred_at) FROM usage_events WHERE source='relay' AND origin IS NOT NULL AND origin!='cloud'
+                    AND origin NOT IN (SELECT origin FROM devices) GROUP BY origin",
+            )
+            .map_err(error)?;
+        let others = query
+            .query_map([], |row| {
+                Ok(json!({"name":row.get::<_, Option<String>>(1)?,"details":row.get::<_, Option<String>>(2)?,
+                    "announcedAt":row.get::<_, Option<i64>>(3)?,"lastUsage":row.get::<_, Option<i64>>(4)?}))
+            })
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let cloud: Option<i64> = self
+            .0
+            .query_row(
+                "SELECT MAX(occurred_at) FROM usage_events WHERE source='relay' AND surface='cloud'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        Ok(json!({"others":others,"cloudLastUsage":cloud}))
     }
 
     /// The saved Allowance vs tokens range, 28 days unless 7 or 90 was chosen.
@@ -824,7 +909,7 @@ pub fn insert_usage(
     request: &crate::usage::Request,
 ) -> Result<(), String> {
     db.execute(
-        "INSERT INTO usage_events VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        "INSERT INTO usage_events (account,source,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
         ON CONFLICT(account,key) DO UPDATE SET source=excluded.source,occurred_at=excluded.occurred_at,surface=excluded.surface,
         model=excluded.model,effort=excluded.effort,speed=excluded.speed,query_source=excluded.query_source,agent=excluded.agent,
         input=excluded.input,output=excluded.output,cache_read=excluded.cache_read,cache_write=excluded.cache_write,
@@ -1340,6 +1425,36 @@ mod tests {
             .collect();
         surfaces.sort();
         assert_eq!(surfaces, ["cli", "cloud", "other:cli"]);
+
+        // Once the sending computer announces itself, its usage carries its name.
+        store
+            .relay_details(
+                &[("claude:one".into(), "mac".into(), "o".repeat(43))],
+                &[crate::usage_relay::Announced {
+                    origin: "o".repeat(43),
+                    name: "Studio Mac".into(),
+                    details: "m-dash 0.6.0;logs=1;feed=1".into(),
+                    at: now as i64,
+                }],
+            )
+            .unwrap();
+        let ledger = store
+            .consistency(
+                crate::burn::Provider::Claude,
+                &json!({"accountId":"claude:one","windows":[]}),
+                now,
+                28,
+            )
+            .unwrap();
+        assert!(ledger["surfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["surface"] == "other:cli@Studio Mac"));
+        let computers = store.computers().unwrap();
+        assert_eq!(computers["others"][0]["name"], "Studio Mac");
+        assert_eq!(computers["others"][0]["lastUsage"], now as i64);
+        assert_eq!(computers["cloudLastUsage"], now as i64);
     }
 
     #[test]

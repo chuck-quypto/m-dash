@@ -10,6 +10,25 @@ type Result<T> = std::result::Result<T, String>;
 #[cfg(any(windows, target_os = "macos"))]
 const TARGET: &str = "net.chuckdudley.mdash/usage-relay";
 const CODE_PREFIX: &str = "mdash-usage1:";
+/// Account of the rows that announce a computer's name and setup instead of usage. No provider
+/// account looks like this, so versions that predate announcements store them but never show them.
+const DEVICE_ACCOUNT: &str = "m-dash:device";
+
+/// What this computer tells the others on the channel about itself, once a day or on a change.
+pub struct Device {
+    pub name: String,
+    /// Short setup summary, such as "m-dash 0.6.0;logs=1;feed=0".
+    pub details: String,
+}
+
+/// Another computer's announcement: its channel identity, name, setup summary and time.
+#[derive(Debug, PartialEq)]
+pub struct Announced {
+    pub origin: String,
+    pub name: String,
+    pub details: String,
+    pub at: i64,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -245,6 +264,37 @@ pub fn wire(
         "reasoning":request.reasoning,"costMicros":request.cost_micros,"origin":device})
 }
 
+/// The row announcing this computer. Its key changes daily and with its content, so the relay,
+/// which keeps rows for 14 days and ignores repeated keys, always holds a recent one.
+fn announcement(device: &Device, origin: &str, now: i64) -> Value {
+    let name: String = device.name.chars().take(64).collect();
+    let details: String = device.details.chars().take(128).collect();
+    let digest = m_dash_sync::hash(&format!("{name}\n{details}"));
+    json!({"provider":"codex","account":DEVICE_ACCOUNT,"key":format!("device:{}:{}", now / 86_400, &digest[..12]),"at":now,
+        "surface":"device","model":name,"effort":null,"speed":null,"querySource":details,"agent":null,
+        "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":null,"costMicros":null,"origin":origin})
+}
+
+/// Parses another computer's announcement.
+pub fn announced(row: &Value, device: &str) -> Option<Announced> {
+    let origin = row["origin"]
+        .as_str()
+        .filter(|origin| *origin != device && *origin != "cloud")?;
+    (row["account"] == DEVICE_ACCOUNT).then_some(())?;
+    let text = |name: &str, max: usize| {
+        row[name]
+            .as_str()
+            .filter(|value| !value.is_empty() && value.chars().count() <= max)
+            .map(str::to_owned)
+    };
+    Some(Announced {
+        origin: origin.to_owned(),
+        name: text("model", 64)?,
+        details: text("querySource", 128).unwrap_or_default(),
+        at: row["at"].as_i64()?,
+    })
+}
+
 /// Parses one row read from the relay, skipping this computer's own rows.
 pub fn unwire(row: &Value, device: &str) -> Option<(i64, crate::usage::Keyed)> {
     let text = |name: &str| {
@@ -255,7 +305,7 @@ pub fn unwire(row: &Value, device: &str) -> Option<(i64, crate::usage::Keyed)> {
     };
     let amount = |name: &str| row[name].as_i64().filter(|value| *value >= 0);
     let origin = row["origin"].as_str()?;
-    if origin == device {
+    if origin == device || row["account"] == DEVICE_ACCOUNT {
         return None;
     }
     let surface = if origin == "cloud" {
@@ -289,12 +339,36 @@ pub fn unwire(row: &Value, device: &str) -> Option<(i64, crate::usage::Keyed)> {
 
 /// Sends local rows added since the last pass and stores rows from other sources.
 /// Network calls run without the collector lock; `with_store` takes it briefly.
+/// Returns whether a channel is set up.
 pub async fn sync(
     with_store: impl Fn(&mut dyn FnMut(&mut crate::store::Store) -> Result<()>) -> Result<()>,
-) -> Result<()> {
+    me: Device,
+) -> Result<bool> {
     let Some(channel) = load()? else {
-        return Ok(());
+        return Ok(false);
     };
+    let row = announcement(&me, &channel.device, crate::collector::now() as i64);
+    let key = row["key"].as_str().unwrap_or_default().to_owned();
+    let mut sent = String::new();
+    with_store(&mut |store| {
+        sent = store
+            .setting(&format!("usage-relay-announced:{}", channel.id))?
+            .unwrap_or_default();
+        Ok(())
+    })?;
+    if sent != key {
+        m_dash_sync::usage_request(
+            &channel.endpoint,
+            &format!("/v1/usage/{}/rows", channel.id),
+            Method::POST,
+            &channel.ingest,
+            Some(json!({ "rows": [row] })),
+        )
+        .await?;
+        with_store(&mut |store| {
+            store.save_setting(&format!("usage-relay-announced:{}", channel.id), &key)
+        })?;
+    }
     for _ in 0..5 {
         let mut batch = (0_i64, Vec::new());
         with_store(&mut |store| {
@@ -347,12 +421,30 @@ pub async fn sync(
             .iter()
             .filter_map(|row| unwire(row, &channel.device))
             .collect();
-        with_store(&mut |store| store.ingest_relay(&channel.id, &parsed, last))?;
+        let origins: Vec<(String, String, String)> = rows
+            .iter()
+            .filter(|row| unwire(row, &channel.device).is_some())
+            .filter_map(|row| {
+                Some((
+                    row["account"].as_str()?.to_owned(),
+                    row["key"].as_str()?.to_owned(),
+                    row["origin"].as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        let devices: Vec<Announced> = rows
+            .iter()
+            .filter_map(|row| announced(row, &channel.device))
+            .collect();
+        with_store(&mut |store| {
+            store.ingest_relay(&channel.id, &parsed, last)?;
+            store.relay_details(&origins, &devices)
+        })?;
         if rows.len() < 200 {
             break;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -417,5 +509,34 @@ mod tests {
         assert_eq!(unwire(&row, "mine").unwrap().1 .3.surface, "cloud");
         row["input"] = json!(-1);
         assert!(unwire(&row, "mine").is_none());
+    }
+
+    #[test]
+    fn announcements_name_other_computers_and_are_not_usage() {
+        let me = Device {
+            name: "Studio Mac".into(),
+            details: "m-dash 0.6.0;logs=1;feed=0".into(),
+        };
+        let row = announcement(&me, "other", 86_400 * 3 + 5);
+        assert!(row["key"].as_str().unwrap().starts_with("device:3:"));
+        assert!(unwire(&row, "mine").is_none());
+        assert!(announced(&row, "other").is_none());
+        assert_eq!(
+            announced(&row, "mine"),
+            Some(Announced {
+                origin: "other".into(),
+                name: "Studio Mac".into(),
+                details: "m-dash 0.6.0;logs=1;feed=0".into(),
+                at: 86_400 * 3 + 5
+            })
+        );
+        let renamed = Device {
+            name: "Office".into(),
+            ..me
+        };
+        assert_ne!(
+            announcement(&renamed, "other", 86_400 * 3 + 5)["key"],
+            row["key"]
+        );
     }
 }

@@ -934,21 +934,43 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         }
     }
     read_local_logs(&app, settings_generation).await;
-    let relay_error = usage_relay::sync(|apply| {
-        let mut inner = state
+    let me = {
+        let inner = state
             .0
             .lock()
-            .map_err(|_| "The collector state is unavailable.".to_string())?;
-        apply(&mut inner.store)
-    })
-    .await
-    .err();
+            .map_err(|_| "The collector state is unavailable.")?;
+        usage_relay::Device {
+            name: device_name(&inner.store),
+            details: format!(
+                "m-dash {};logs={};feed={}",
+                app.package_info().version,
+                u8::from(inner.dashboard.settings.local_logs),
+                u8::from(inner.dashboard.claude_enabled)
+            ),
+        }
+    };
+    let relay = usage_relay::sync(
+        |apply| {
+            let mut inner = state
+                .0
+                .lock()
+                .map_err(|_| "The collector state is unavailable.".to_string())?;
+            apply(&mut inner.store)
+        },
+        me,
+    )
+    .await;
+    let usage_channel = relay.as_ref().ok().copied();
+    let relay_error = relay.err();
     let mut inner = state
         .0
         .lock()
         .map_err(|_| "The collector state is unavailable.")?;
     inner.dashboard.refreshing = false;
     inner.dashboard.usage_relay_error = relay_error;
+    if let Some(channel) = usage_channel {
+        inner.dashboard.usage_channel = channel;
+    }
     let now = collector::now();
     if now >= inner.last_prune.saturating_add(86_400) {
         let _ = inner.store.prune(now);
@@ -1006,6 +1028,53 @@ fn update_consistency(inner: &mut Inner, now: u64) {
         }
     }
     inner.dashboard.consistency = serde_json::Value::Object(ledgers);
+    if let Ok(mut computers) = inner.store.computers() {
+        computers["name"] = serde_json::json!(device_name(&inner.store));
+        inner.dashboard.computers = computers;
+    }
+}
+
+/// This computer's name on the usage channel: the owner's choice, or the system's name.
+fn device_name(store: &store::Store) -> String {
+    store
+        .setting("device-name")
+        .ok()
+        .flatten()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(system_name)
+}
+
+fn system_name() -> String {
+    #[cfg(target_os = "macos")]
+    let name = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok());
+    #[cfg(windows)]
+    let name = std::env::var("COMPUTERNAME").ok();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let name = std::fs::read_to_string("/etc/hostname").ok();
+    name.map(|name| name.trim().chars().take(64).collect::<String>())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "This computer".into())
+}
+
+#[tauri::command]
+fn set_device_name(app: tauri::AppHandle, name: String) -> Result<Dashboard, String> {
+    let name = name.trim();
+    if name.chars().count() > 64 {
+        return Err("Use a name of up to 64 characters.".into());
+    }
+    let state = app.state::<AppState>();
+    let mut inner = state
+        .0
+        .lock()
+        .map_err(|_| "The collector state is unavailable.")?;
+    inner.store.save_setting("device-name", name)?;
+    update_consistency(&mut inner, collector::now());
+    publish_dashboard(&app, &inner.dashboard);
+    Ok(inner.dashboard.clone())
 }
 
 /// Best-effort: an unreadable log leaves its saved position and is retried on the next pass.
@@ -1060,7 +1129,7 @@ pub fn run() {
         }))
         .manage(CompactState::default())
         .manage(mobile_sync::State::default())
-        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, set_ledger_days, add_ledger_mark, remove_ledger_mark, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
+        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, set_ledger_days, add_ledger_mark, remove_ledger_mark, set_device_name, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             macos_lifecycle::install(app.handle());

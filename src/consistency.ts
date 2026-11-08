@@ -25,8 +25,12 @@ const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumF
 const usd = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
 const percent = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 0 });
 const surfaceNames: Record<string, string> = { cli: 'Terminal', desktop: 'Desktop app', cloud: 'Cloud session', codex: 'Codex CLI' };
-// Rows shared by your other computers arrive as "other:<surface>".
-const surfaceName = (surface: string) => surface.startsWith('other:') ? `Other computer · ${surfaceNames[surface.slice(6)] ?? surface.slice(6)}` : surfaceNames[surface] ?? surface;
+// Rows shared by your other computers arrive as "other:<surface>", or "other:<surface>@<name>" once that computer has announced its name.
+function surfaceName(surface: string) {
+  if (!surface.startsWith('other:')) return surfaceNames[surface] ?? surface;
+  const [where, ...name] = surface.slice(6).split('@');
+  return `${name.length ? name.join('@') : 'Other computer'} · ${surfaceNames[where] ?? where}`;
+}
 const shared = (surface: string) => surface === 'cloud' || surface.startsWith('other:');
 
 const markDate = (mark: LedgerMark) => new Date(mark.at * 1000).toISOString().slice(0, 10);
@@ -148,13 +152,38 @@ function observedFrom(ledgers: Ledgers) {
   return 'this computer';
 }
 
-export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28) {
+export interface Computers { name?: string; cloudLastUsage?: number | null; others?: { name: string | null; details: string | null; announcedAt: number | null; lastUsage: number | null }[] }
+
+const ago = (seconds: number | null | undefined) => {
+  if (seconds == null) return 'never';
+  const hours = (Date.now() / 1000 - seconds) / 3600;
+  return hours < 1 ? 'within the hour' : hours < 48 ? `${Math.round(hours)}h ago` : `${Math.round(hours / 24)} days ago`;
+};
+const onOff = (value: boolean | null) => value == null ? '<span class="support">unknown</span>' : value ? 'On' : '<span class="warning-text">Off</span>';
+const flag = (details: string | null, name: string) => { const match = new RegExp(`(?:^|;)${name}=(\\d)`).exec(details ?? ''); return match ? match[1] === '1' : null; };
+
+// Where the ledger's observed usage comes from, what each computer contributes and what stays invisible.
+function computersPanel(computers: Computers, channel: boolean, localLogs: boolean, claudeFeed: boolean, claude: boolean) {
+  const others = computers.others ?? [];
+  const stale = (row: { lastUsage: number | null; announcedAt: number | null }) => Math.max(row.lastUsage ?? 0, row.announcedAt ?? 0) < Date.now() / 1000 - 3 * 86_400;
+  const rows = [`<tr><td><input type="text" id="device-name" maxlength="64" value="${escape(computers.name ?? '')}" aria-label="This computer's name"> <button class="text-button" id="device-name-save">Rename</button><br><span class="support">This computer</span></td><td>Now</td><td>${onOff(localLogs)}</td><td>${claude ? onOff(claudeFeed) : '—'}</td><td></td></tr>`,
+    ...others.map(row => `<tr><td>${escape(row.name ?? 'Unnamed computer')}${row.name ? '' : '<br><span class="support">Update m-dash there to see its name</span>'}</td><td class="${stale(row) ? 'warning-text' : ''}">${ago(row.lastUsage)}</td><td>${onOff(flag(row.details, 'logs'))}</td><td>${claude ? onOff(flag(row.details, 'feed')) : '—'}</td><td class="support">${escape((row.details ?? '').split(';')[0])}</td></tr>`)];
+  const cloud = claude ? `<p class="support">Claude cloud sessions: last usage ${ago(computers.cloudLastUsage)}.${computers.cloudLastUsage == null ? ' If you use them, add the setup script from Settings to each cloud environment.' : ''}</p>` : '';
+  return `<section class="panel"><h2>Computers and coverage</h2>
+    ${channel ? '<p class="support">These computers share usage over your usage channel. Turn on <strong>Local session logs</strong> on each one so usage from while m-dash was closed is counted too. A computer whose last usage is more than three days old is shown in amber.</p>' : '<p class="support">Only this computer is counted. To include your other computers and Claude cloud sessions, set up <strong>Cloud sessions and other computers</strong> in Settings.</p>'}
+    <table><caption class="sr-only">Computers reporting usage</caption><thead><tr><th scope="col">Computer</th><th scope="col">Last usage</th><th scope="col">Local session logs</th><th scope="col">Claude feed</th><th scope="col">Version</th></tr></thead><tbody>${rows.join('')}</tbody></table>
+    ${channel ? cloud : ''}
+    <p class="support">m-dash can't see chat and mobile apps, Claude Cowork and Duet, ChatGPT Dots, Codex cloud tasks or code review. Their use counts toward the same allowances and shows as unattributed.</p></section>`;
+}
+
+export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28, computers: Computers = {}, channel = false) {
   const providers = (['codex', 'claude'] as const).filter(provider => enabled[provider]);
   const intro = `<p class="support">Compares how far each allowance moved over the last ${days} days with the tokens m-dash observed on ${observedFrom(ledgers)}. Token types are weighted by the provider's published prices, Claude models by their API price (an Opus token counts more than a Haiku token), and the baseline rate comes from your most efficient days, learned separately before and after each plan change. Anything above it is <strong>unattributed</strong>: usage m-dash did not see, such as chat and mobile apps, background agents such as Claude Duet, tasks started by ChatGPT Dots, Codex cloud tasks, or computers and cloud sessions not on your usage channel. A plan or provider change shows as a rate shift.</p>
     ${localLogs ? '' : '<p class="warning-text">Turn on <strong>Local session logs</strong> in Settings for Codex token detail and Claude sessions run while m-dash was closed.</p>'}
     ${enabled.claude && !claudeFeed ? '<p class="warning-text">Enable the Claude local feed in Settings for cost, cloud-session and subagent detail.</p>' : ''}`;
   if (!providers.length) return `<section class="panel"><h2>Allowance vs tokens</h2>${intro}<p class="empty">Enable Codex or Claude in Settings.</p></section>`;
   return `<section class="panel"><div class="section-heading"><h2>Allowance vs tokens</h2><div class="ledger-actions">${rangePicker(days)}<button id="copy-ledger" class="text-button">Copy daily CSV</button></div></div>${intro}</section>
+    ${computersPanel(computers, channel, localLogs, claudeFeed, enabled.claude)}
     ${providers.map(provider => {
       const ledger = ledgers[provider];
       const name = provider === 'codex' ? 'Codex' : 'Claude';
