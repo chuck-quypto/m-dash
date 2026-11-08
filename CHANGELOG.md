@@ -6,6 +6,19 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+## [0.5.4-rc.2] - 2026-11-08
+
+### Fixed
+- Claude Code cloud sessions now actually report their usage. Cloud environments
+  drop variables named `OTEL_…`, so the four variables that **Cloud sessions and
+  other computers** used to give were never seen by cloud sessions. Settings now
+  gives a **setup script** to paste into the cloud environment instead; it writes
+  the same settings into Claude Code's own settings before each session starts.
+  The relay host still has to be in the environment's allowed domains.
+- The **Observed usage** table on Allowance vs tokens always lists cloud-session
+  rows. Before, it showed only the 12 largest groups, so cloud usage that had
+  arrived could be hidden behind 28 days of local usage.
+
 ## [0.5.4-rc.1] - 2026-11-07
 
 Release candidate for 0.5.4. Version 0.5.3 was prepared but never published, so
@@ -121,7 +134,8 @@ First public release. Targets Windows x64 and Apple Silicon macOS.
 - Android, encrypted mobile sync and the relay are experimental and are not part
   of this release.
 
-[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.1...HEAD
+[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.2...HEAD
+[0.5.4-rc.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.1...v0.5.4-rc.2
 [0.5.4-rc.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...v0.5.4-rc.1
 [0.5.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.0...v0.5.1

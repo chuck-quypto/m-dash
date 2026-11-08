@@ -85,7 +85,7 @@ let notice: { scope: NoticeScope; text: string } | null = null;
 const setNotice = (scope: NoticeScope, text: string) => { notice = text ? { scope, text } : null; };
 const noticeLine = (scope: NoticeScope) => notice?.scope === scope ? `<p class="action-notice" role="status">${escape(notice.text)}</p>` : '';
 let appError = '';
-interface UsageRelay { endpoint: string; cloudEnvironment: string; code: string }
+interface UsageRelay { endpoint: string; cloudSetup: string; code: string }
 // undefined until first read; null when this computer has no usage channel.
 let usageRelay: UsageRelay | null | undefined;
 let usageRelayEndpoint = '';
@@ -221,12 +221,14 @@ function connections() {
     ${enabled.grok ? `<div class="connection-row"><div><h3>Grok CLI</h3><p>Install the Grok CLI and run grok login, then refresh. Your sign-in supplies plan and billing information; missing allowance percentages stay unavailable.</p>${state.grokError ? `<p class="warning-text">${escape(state.grokError)}</p>` : ''}</div><span class="badge ${state.grokError ? 'warning' : ''}">${state.grokError ? 'Needs attention' : state.grok ? 'Billing connected' : 'Awaiting read'}</span></div>` : ''}
     ${enabled.openrouter ? `<div class="connection-row"><div><h3>OpenRouter</h3><p>${state.openrouterConfigured ? 'Management key saved in your system’s secure credential store.' : 'Account-wide reports require an OpenRouter management key.'} Enter the key in the native secure prompt. The key never enters this web interface. Management keys can administer API keys and budgets; m-dash calls only the read-only credit and activity endpoints.</p><p>Disconnect removes the saved key and keeps local history. Replacing the key starts separate history. <button id="openrouter-settings" class="text-button">OpenRouter management keys ↗</button></p>${state.openrouterError ? `<p class="warning-text">${escape(state.openrouterError)}</p>` : ''}${noticeLine('openrouter')}</div><div class="connection-actions"><button id="openrouter-connect" class="refresh" ${setupBusy ? 'disabled' : ''}>${state.openrouterConfigured ? 'Replace key' : 'Connect key'}</button>${state.openrouterConfigured ? `<button id="openrouter-disconnect" class="text-button" ${setupBusy ? 'disabled' : ''}>Disconnect</button>` : ''}</div></div>` : ''}</section>` : ''}`;
 }
+const hostOf = (url: string) => { try { return new URL(url).host; } catch { return url; } };
+
 function usageRelayPanel() {
   if (usageRelay === undefined) { if (!usageRelayLoading) { usageRelayLoading = true; void loadUsageRelay(); } return ''; }
   const intro = '<p>Shares per-request token counts between your own computers, and receives usage from Claude Code cloud sessions, through your relay. The relay keeps token counts, model and request identifiers for 14 days; prompts, content and email addresses are dropped before storage. Off unless you set it up.</p>';
   const body = usageRelay ? `<p class="support">Connected to ${escape(usageRelay.endpoint)}.</p>
-    <h3>Claude Code cloud sessions</h3><p class="support">Add these variables to each cloud environment (Environment settings → Environment variables), and allow the relay host in its network access. New cloud sessions then report their token usage here.</p>
-    <textarea id="usage-relay-env" class="code-block" readonly rows="4" aria-label="Cloud environment variables">${escape(usageRelay.cloudEnvironment)}</textarea><button id="copy-usage-env" class="text-button" type="button">Copy variables</button>
+    <h3>Claude Code cloud sessions</h3><p class="support">Paste this into each cloud environment's <strong>Setup script</strong>, and add <strong>${escape(hostOf(usageRelay.endpoint))}</strong> to its allowed domains under Network access. New cloud sessions then report their token usage here. Cloud environments drop variables named OTEL_…, so the script writes Claude Code's own settings instead. It contains this channel's write secret; keep it private.</p>
+    <textarea id="usage-relay-env" class="code-block" readonly rows="6" aria-label="Cloud environment setup script">${escape(usageRelay.cloudSetup)}</textarea><button id="copy-usage-env" class="text-button" type="button">Copy setup script</button>
     <h3>Your other computers</h3><p class="support">On another computer running m-dash, paste this code under <strong>Join a usage channel</strong>. Anyone with it can read your shared usage; keep it private.</p>
     <textarea id="usage-relay-code" class="code-block" readonly rows="2" aria-label="Usage channel code">${escape(usageRelay.code)}</textarea><button id="copy-usage-code" class="text-button" type="button">Copy code</button>
     ${state.usageRelayError ? `<p class="warning-text">Last exchange: ${escape(state.usageRelayError)}</p>` : ''}
