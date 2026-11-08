@@ -1,5 +1,7 @@
 # Experimental relay — outside desktop release scope
 
+m-dash doesn't need a relay for normal use. This is the reference relay, for Cloudflare Workers; m-dash accepts a relay on any public HTTPS host, and [the guide](../docs/CLOUD_USAGE.md#other-hosts) lists the contract for porting it.
+
 This Cloudflare Worker/D1 implementation is development code. No managed relay,
 Android release or service availability is promised. Desktop users can leave the
 Mobile companion panel unconfigured. Never point tests at someone else's relay.

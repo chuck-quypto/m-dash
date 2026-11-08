@@ -59,7 +59,7 @@ Connect an ARM64 phone running Android 8 or later by USB, enable **Developer opt
 
 `pullCloudflare()` remains the disconnected/browser fallback and makes no request. The installed Android app can accept a ten-minute code from desktop Settings → Mobile companion. Review the disclosure, compare verification values on both devices, approve on desktop and refresh on Android. The WebView CSP still permits local IPC only; native HTTPS requests are bounded and refuse redirects. Samples and live protected state never share a cache. Clear on Android removes its copy; revoke on desktop stops relay delivery.
 
-The desktop publisher supports Windows Credential Manager and macOS Keychain. Each computer needs its own secure relay setup and phone approval. The development relay is restricted to Cloudflare `workers.dev` origins; self-hosting needs separate qualification. See [relay development boundaries](../relay/README.md) and [protocol](../docs/development/SYNC_PROTOCOL.md) before live data. No relay address or enrollment credential is bundled for public users.
+The desktop publisher supports Windows Credential Manager and macOS Keychain. Each computer needs its own secure relay setup and phone approval. The relay can be any public HTTPS origin; the reference implementation in `relay/` runs on Cloudflare Workers. See [relay development boundaries](../relay/README.md) and [protocol](../docs/development/SYNC_PROTOCOL.md) before live data. No relay address or enrollment credential is bundled for public users.
 
 Cellular away-from-home use, TalkBack, release signing, dependency notices, production sync/security, iPhone and publication remain separate gates.
 

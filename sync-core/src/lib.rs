@@ -38,11 +38,13 @@ pub fn endpoint(value: &str) -> Result<String> {
         return Err("Enter an HTTPS relay origin without a path or port.".into());
     }
     let host = u.host_str().unwrap();
+    // Any public HTTPS host: the relay protocol is plain HTTPS and JSON, and nothing ties it to one provider.
     if host == "localhost"
+        || host.ends_with(".localhost")
         || host.parse::<std::net::IpAddr>().is_ok()
-        || !host.ends_with(".workers.dev")
+        || !host.contains('.')
     {
-        return Err("This development build accepts Cloudflare workers.dev relays only.".into());
+        return Err("Enter a public HTTPS relay address, not localhost or an IP address.".into());
     }
     Ok(u.origin().ascii_serialization())
 }
@@ -631,9 +633,16 @@ mod replay_tests {
             "https://127.0.0.1",
             "https://relay.example.workers.dev/path",
             "https://user:pass@relay.example.workers.dev",
-            "https://evil.example",
+            "https://relay.localhost",
+            "https://intranet",
         ] {
             assert!(Pair::new(url, 1000).is_err());
+        }
+        for url in [
+            "https://relay.example.com",
+            "https://m-dash.example.azurewebsites.net",
+        ] {
+            assert!(Pair::new(url, 1000).is_ok());
         }
     }
 }

@@ -1,5 +1,10 @@
 # Cloud sessions and other computers
 
+> **You don't need any of this to use m-dash.** m-dash works fully on its own,
+> with no Cloudflare account, relay or cloud service. A relay is only needed if
+> you want usage from Claude Code cloud sessions, or from your other computers,
+> to show up on the Allowance vs tokens page.
+
 The **Allowance vs tokens** page compares how far each allowance moved with the
 tokens m-dash saw. Usage that m-dash can't see shows up as *unattributed*. Two
 common sources of that are Claude Code cloud sessions (claude.ai/code) and your
@@ -29,6 +34,10 @@ keeps per-request token counts, model and request identifiers for 14 days, and
 drops prompts, content and email addresses before storing anything.
 
 There is no hosted m-dash relay. You run your own, and only you hold its secrets.
+m-dash works with a relay hosted anywhere that serves public HTTPS. This guide
+uses the reference implementation in `relay/`, which runs on Cloudflare Workers
+and D1 because they're cheap and quick to set up. To host it elsewhere, see
+[Other hosts](#other-hosts).
 
 ## 1. Deploy your relay
 
@@ -203,6 +212,29 @@ If no row appears after a refresh:
 | You only added the four `OTEL_…` variables | They don't work. Use the setup script (part 4). |
 | Rows from your other computers are missing | That computer joined with the code (part 3) and m-dash is running on it. |
 
+## Other hosts
+
+m-dash doesn't depend on any Cloudflare feature. The relay is a small HTTPS and
+JSON service with one SQL table pair, so it can run on AWS (Lambda with DynamoDB
+or a SQL database), Azure Functions, Google Cloud Run, or a server of your own.
+m-dash accepts any public `https://` origin with no path, port, IP address or
+localhost. Port `relay/worker.mjs`, keeping this contract:
+
+| Request | Auth | Does |
+| --- | --- | --- |
+| `POST /v1/usage` with `{"id","ingestHash","readHash"}` | `Bearer` enrollment secret | Creates a channel (201, or 409 if it exists). Hashes are unpadded base64url SHA-256 of the 43-character tokens. |
+| `POST /v1/usage/{id}/rows` with `{"rows":[…]}` | `Bearer` ingest token | Stores up to 200 rows, ignoring duplicates of the same account and key. |
+| `GET /v1/usage/{id}/rows/{after}` | `Bearer` read token | Returns `{"rows":[{"seq",…}]}`: up to 200 rows after `seq`, in order. |
+| `DELETE /v1/usage/{id}` | `Bearer` read token | Deletes the channel and its rows. |
+| `POST /v1/usage/{id}/{ingest token}/logs` | Token in the path | Accepts OTLP JSON logs from Claude Code and keeps only `api_request` accounting fields. |
+
+Refuse requests that carry a query string or an `Origin` header, answer 401 for
+a wrong or missing token, and delete rows after 14 days. The exact row fields and
+checks are in `usageRow` and `otlpRows` in `worker.mjs`, and `relay/test/` shows
+the expected behavior. Keep the enrollment secret in your platform's secret
+store. The mobile companion uses other routes on the same relay; see the
+[sync protocol](development/SYNC_PROTOCOL.md).
+
 ## Undo it
 
 - **One computer:** in **Settings → Cloud sessions and other computers**, click
@@ -211,7 +243,7 @@ If no row appears after a refresh:
   channel and its rows from the relay. Then, in the cloud environment, remove the
   setup script lines and the allowed domain. New cloud sessions stop reporting.
 - **The relay itself:** in the Cloudflare dashboard, delete the Worker and the D1
-  database. Cloudflare can keep D1 recovery history for up to 30 days. See
+  database (or remove the service from wherever you host it). Cloudflare can keep D1 recovery history for up to 30 days. See
   [privacy and storage](PRIVACY.md).
 
 Rows expire from the relay after 14 days either way. Usage already copied into
