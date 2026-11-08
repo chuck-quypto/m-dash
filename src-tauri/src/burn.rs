@@ -43,16 +43,54 @@ pub enum Provider {
 
 /// Relative price of each token type against fresh input, from the providers' published
 /// price lists: Anthropic API prices for Claude and the Codex credit rate card for Codex
-/// (which counts reasoning inside output). Model price differences are not applied.
+/// (which counts reasoning inside output). Claude tokens are also scaled by their model's
+/// price (see `claude_model_factor`); Codex model differences are not applied.
 fn weighted(provider: Provider, usage: &Usage) -> f64 {
-    let (output, read, write) = match provider {
-        Provider::Claude => (5.0, 0.1, 1.25),
-        Provider::Codex => (6.0, 0.1, 1.0),
+    let (output, read, write, model) = match provider {
+        Provider::Claude => (5.0, 0.1, 1.25, claude_model_factor(&usage.model)),
+        Provider::Codex => (6.0, 0.1, 1.0, 1.0),
     };
-    usage.input as f64
-        + output * usage.output as f64
-        + read * usage.cache_read as f64
-        + write * usage.cache_write as f64
+    model
+        * (usage.input as f64
+            + output * usage.output as f64
+            + read * usage.cache_read as f64
+            + write * usage.cache_write as f64)
+}
+
+/// The first two numbers after `family-` in a model ID, such as (4, 1) for
+/// "claude-opus-4-1-20250805" or (5, 0) for "claude-sonnet-5". Date suffixes are not versions.
+fn version(model: &str, family: &str) -> Option<(u32, u32)> {
+    let rest = &model[model.find(family)? + family.len()..];
+    let mut parts = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().ok().filter(|_| part.len() <= 2));
+    let major = parts.next()??;
+    Some((major, parts.next().flatten().unwrap_or(0)))
+}
+
+/// A Claude model's API input price relative to $5 per million tokens, the Opus 4.5 to Opus 5
+/// price, so Opus usage keeps its familiar scale. Every listed model keeps the same output, cache
+/// read and cache write ratios, so one factor per model is enough. Unknown models count as 1.
+fn claude_model_factor(model: &str) -> f64 {
+    let model = model.to_ascii_lowercase();
+    if model.contains("fable") || model.contains("mythos") {
+        return 2.0; // $10
+    }
+    if let Some(version) = version(&model, "opus-") {
+        return match version {
+            (4, 0..=1) | (0..=3, _) => 3.0, // $15
+            (5, 5..) | (6.., _) => 0.8,     // $4
+            _ => 1.0,                       // $5
+        };
+    }
+    if let Some((major, _)) = version(&model, "sonnet-") {
+        return if major >= 5 { 0.4 } else { 0.6 }; // $2 or $3
+    }
+    if let Some((major, _)) = version(&model, "haiku-") {
+        return if major >= 5 { 0.02 } else { 0.2 }; // $0.10 or $1
+    }
+    1.0
 }
 
 fn date(at: i64) -> String {
@@ -311,6 +349,34 @@ pub fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_tokens_are_scaled_by_model_price() {
+        for (model, factor) in [
+            ("claude-opus-5", 1.0),
+            ("claude-opus-4-8[1m]", 1.0),
+            ("claude-opus-5-5", 0.8),
+            ("claude-opus-4-1-20250805", 3.0),
+            ("claude-opus-4-20250514", 3.0),
+            ("claude-sonnet-5-5", 0.4),
+            ("claude-sonnet-4-6", 0.6),
+            ("claude-haiku-4-5-20251001", 0.2),
+            ("claude-haiku-5-5", 0.02),
+            ("claude-fable-5-1", 2.0),
+            ("", 1.0),
+        ] {
+            assert_eq!(claude_model_factor(model), factor, "{model}");
+        }
+        let usage = |model: &str| Usage {
+            model: model.into(),
+            input: 100,
+            output: 10,
+            ..Default::default()
+        };
+        assert_eq!(weighted(Provider::Claude, &usage("claude-opus-5")), 150.0);
+        assert_eq!(weighted(Provider::Claude, &usage("claude-sonnet-5")), 60.0);
+        assert_eq!(weighted(Provider::Codex, &usage("claude-sonnet-5")), 160.0);
+    }
 
     fn reading(window: &str, at: i64, used: f64) -> Reading {
         Reading {

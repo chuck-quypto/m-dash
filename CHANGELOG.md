@@ -17,6 +17,10 @@ Notable changes to the m-dash desktop app. The format follows
   that usage came from (this computer, your other computers, cloud sessions),
   since usage shared over the usage channel already counted. Before, it said
   "tokens on this computer" even when it wasn't only this computer.
+- Allowance vs tokens weighs Claude usage by each model's API price, so an Opus
+  token counts more than a Sonnet or Haiku token. Before, every Claude model
+  counted the same, which made days heavy in subagents or Haiku look like
+  unexplained burn. Codex models are still counted alike.
 - Relays no longer have to be on Cloudflare `workers.dev`. m-dash accepts any
   public HTTPS relay address (still no path, port, IP address or localhost), and
   the guide lists the relay's contract for hosting it elsewhere. A relay is never
