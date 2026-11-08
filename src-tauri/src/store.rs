@@ -3,6 +3,8 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 const DAY: u64 = 86_400;
+/// Ranges offered on Allowance vs tokens. Per-request rows are kept 90 days.
+pub const LEDGER_DAYS: [u64; 3] = [7, 28, 90];
 
 pub struct Store(Connection);
 impl Store {
@@ -546,6 +548,29 @@ impl Store {
         Ok(result)
     }
 
+    /// The saved Allowance vs tokens range, 28 days unless 7 or 90 was chosen.
+    pub fn ledger_days(&self) -> u64 {
+        self.0
+            .query_row(
+                "SELECT value FROM settings WHERE key='ledger-days'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .filter(|days| LEDGER_DAYS.contains(days))
+            .unwrap_or(28)
+    }
+
+    pub fn save_ledger_days(&self, days: u64) -> Result<(), String> {
+        if !LEDGER_DAYS.contains(&days) {
+            return Err("Choose 7, 28 or 90 days.".into());
+        }
+        self.0.execute("INSERT INTO settings (key,value) VALUES ('ledger-days',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [days.to_string()])
+            .map_err(|_| "Cannot save the Allowance vs tokens range.")?;
+        Ok(())
+    }
+
     fn relay_state(&self, channel: &str) -> Result<Value, String> {
         let text: Option<String> = self
             .0
@@ -1087,6 +1112,18 @@ mod tests {
         );
         assert_eq!(store.unshared_usage("other", 10).unwrap().1.len(), 3);
         assert_eq!(store.relay_cursor("other").unwrap(), 0);
+    }
+
+    #[test]
+    fn ledger_range_is_saved_and_limited_to_offered_choices() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.sqlite");
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.ledger_days(), 28);
+        assert!(store.save_ledger_days(30).is_err());
+        store.save_ledger_days(90).unwrap();
+        drop(store);
+        assert_eq!(Store::open(&path).unwrap().ledger_days(), 90);
     }
 
     #[test]

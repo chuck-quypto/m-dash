@@ -28,7 +28,7 @@ const surfaceName = (surface: string) => surface.startsWith('other:') ? `Other c
 const shared = (surface: string) => surface === 'cloud' || surface.startsWith('other:');
 
 function dayBars(window: LedgerWindow) {
-  const days = window.days.slice(-28);
+  const days = window.days;
   const max = Math.max(...days.map(day => day.points), 1);
   return `<div class="chart ledger-chart" role="img" aria-label="${escape(window.label)}: allowance points per day, explained and unattributed. Exact values are in the copied CSV.">${days.map(day => `<div class="bar-cell" title="${escape(day.date)}: ${number.format(day.points)} points, ${number.format(day.explained)} explained, ${number.format(day.unattributed)} unattributed"><div class="ledger-stack" style="height:${Math.max(2, day.points / max * 100)}%"><div class="ledger-unattributed" style="flex:${day.unattributed}"></div><div class="ledger-explained" style="flex:${day.explained}"></div></div></div>`).join('')}</div>
     <div class="chart-axis"><span>${escape(days[0]?.date ?? '')}</span><span>${escape(days.at(-1)?.date ?? '')}</span></div>`;
@@ -39,7 +39,7 @@ function idleHours(steps: number[]) {
   const hours = Array.from({ length: 24 }, () => 0);
   for (const at of steps) hours[new Date(at * 1000).getHours()] += 1;
   const max = Math.max(...hours, 1);
-  return `<h4>Steps with no local usage, by hour (your time)</h4><div class="chart ledger-hours" role="img" aria-label="Allowance steps with no local usage by hour of day">${hours.map((count, hour) => `<div class="bar-cell" title="${hour}:00: ${count} step${count === 1 ? '' : 's'}"><div class="bar" style="height:${count ? Math.max(4, count / max * 100) : 0}%"></div></div>`).join('')}</div><div class="chart-axis"><span>0:00</span><span>12:00</span><span>23:00</span></div>`;
+  return `<h4>Steps with no observed usage, by hour (your time)</h4><div class="chart ledger-hours" role="img" aria-label="Allowance steps with no observed usage by hour of day">${hours.map((count, hour) => `<div class="bar-cell" title="${hour}:00: ${count} step${count === 1 ? '' : 's'}"><div class="bar" style="height:${count ? Math.max(4, count / max * 100) : 0}%"></div></div>`).join('')}</div><div class="chart-axis"><span>0:00</span><span>12:00</span><span>23:00</span></div>`;
 }
 
 function windowCard(provider: 'codex' | 'claude', window: LedgerWindow) {
@@ -49,11 +49,11 @@ function windowCard(provider: 'codex' | 'claude', window: LedgerWindow) {
     : `One point ≈ ${compact.format(1e6 / window.pointsPerMillion)} weighted tokens.`;
   const shift = window.change;
   const after = shift?.daysAfter;
-  const change = shift ? `<p class="warning-text">Around ${escape(shift.date)}, each point started matching ${shift.factor > 1 ? `about ${number.format(shift.factor)}× fewer` : `about ${number.format(1 / shift.factor)}× more`} tokens seen on this computer${after ? ` (${after} day${after === 1 ? '' : 's'} of data since)` : ''}. A plan change, a provider change or more usage elsewhere can all cause this.</p>` : '';
+  const change = shift ? `<p class="warning-text">Around ${escape(shift.date)}, each point started matching ${shift.factor > 1 ? `about ${number.format(shift.factor)}× fewer` : `about ${number.format(1 / shift.factor)}× more`} observed tokens${after ? ` (${after} day${after === 1 ? '' : 's'} of data since)` : ''}. A plan change, a provider change or more usage elsewhere can all cause this.</p>` : '';
   return `<div class="ledger-window"><h3>${escape(window.label)}</h3>
-    ${window.enough ? `<p><strong>${number.format(window.points)}</strong> points used · <strong>${number.format(window.explained)}</strong> explained by tokens on this computer · <strong class="${share >= 0.25 ? 'warning-text' : ''}">${number.format(window.unattributed)}</strong> unattributed (${percent.format(share)})</p><p class="support">${rate}</p>${change}${dayBars(window)}`
+    ${window.enough ? `<p><strong>${number.format(window.points)}</strong> points used · <strong>${number.format(window.explained)}</strong> explained by observed usage · <strong class="${share >= 0.25 ? 'warning-text' : ''}">${number.format(window.unattributed)}</strong> unattributed (${percent.format(share)})</p><p class="support">${rate}</p>${change}${dayBars(window)}`
       : `<p class="empty">Needs three days with both allowance movement and local usage. ${window.activeDays} so far.</p>`}
-    ${window.idlePoints > 0 ? `<p class="support">${number.format(window.idlePoints)} points moved while no request was seen on this computer.</p>${idleHours(window.idleSteps)}` : ''}</div>`;
+    ${window.idlePoints > 0 ? `<p class="support">${number.format(window.idlePoints)} points moved while m-dash saw no usage.</p>${idleHours(window.idleSteps)}` : ''}</div>`;
 }
 
 // Only some sources report a price: requests without one show as unknown rather than as free.
@@ -74,13 +74,14 @@ function surfaces(ledger: Ledger) {
 }
 
 function serverVsLocal(ledger: Ledger) {
-  const rows = ledger.serverVsLocal.slice(-14);
+  const rows = ledger.serverVsLocal.slice(-Math.min(ledger.days, 28));
+  const here = ledger.surfaces.some(row => shared(row.surface)) ? 'Observed' : 'This computer';
   if (!rows.length) return '';
   const server = rows.reduce((sum, row) => sum + row.server, 0);
   const local = rows.reduce((sum, row) => sum + row.local, 0);
-  return `<h3>Account tokens vs this computer</h3><p class="support">Codex reports account-wide daily tokens. The gap is usage this computer did not log: cloud tasks, code review, tasks started by other agents, the IDE or other computers. Provider day boundaries are unspecified, so compare totals rather than single days.</p>
-    <p><strong>${compact.format(server)}</strong> account · <strong>${compact.format(local)}</strong> this computer · <strong class="${server > 0 && local / server < 0.75 ? 'warning-text' : ''}">${compact.format(Math.max(0, server - local))}</strong> elsewhere over ${rows.length} days</p>
-    <table><caption class="sr-only">Codex daily tokens: account and this computer</caption><thead><tr><th scope="col">Provider day</th><th scope="col" class="numeric">Account</th><th scope="col" class="numeric">This computer</th></tr></thead><tbody>${[...rows].reverse().map(row => `<tr><td>${escape(row.date)}</td><td class="numeric">${compact.format(row.server)}</td><td class="numeric">${compact.format(row.local)}</td></tr>`).join('')}</tbody></table>`;
+  return `<h3>Account tokens vs observed</h3><p class="support">Codex reports account-wide daily tokens. The gap is usage m-dash did not see: cloud tasks, code review, tasks started by other agents, the IDE or computers not on your usage channel. Provider day boundaries are unspecified, so compare totals rather than single days.</p>
+    <p><strong>${compact.format(server)}</strong> account · <strong>${compact.format(local)}</strong> ${here.toLowerCase()} · <strong class="${server > 0 && local / server < 0.75 ? 'warning-text' : ''}">${compact.format(Math.max(0, server - local))}</strong> elsewhere over ${rows.length} days</p>
+    <table><caption class="sr-only">Codex daily tokens: account and ${here.toLowerCase()}</caption><thead><tr><th scope="col">Provider day</th><th scope="col" class="numeric">Account</th><th scope="col" class="numeric">${here}</th></tr></thead><tbody>${[...rows].reverse().map(row => `<tr><td>${escape(row.date)}</td><td class="numeric">${compact.format(row.server)}</td><td class="numeric">${compact.format(row.local)}</td></tr>`).join('')}</tbody></table>`;
 }
 
 export function ledgerCsv(ledgers: Ledgers) {
@@ -91,13 +92,30 @@ export function ledgerCsv(ledgers: Ledgers) {
   return `${lines.join('\n')}\n`;
 }
 
-export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean) {
+export const ledgerRanges = [7, 28, 90] as const;
+
+function rangePicker(days: number) {
+  return `<div class="ledger-range" role="group" aria-label="Range">${ledgerRanges.map(range => `<button class="text-button${range === days ? ' active' : ''}" data-ledger-days="${range}" aria-pressed="${range === days}">${range} days</button>`).join('')}</div>`;
+}
+
+// What the ledger's observed usage covers: this computer alone, or also the usage channel.
+function observedFrom(ledgers: Ledgers) {
+  const surfaces = Object.values(ledgers).flatMap(ledger => ledger?.surfaces ?? []);
+  const others = surfaces.some(row => row.surface.startsWith('other:'));
+  const cloud = surfaces.some(row => row.surface === 'cloud');
+  if (others && cloud) return 'this computer, your other computers and Claude cloud sessions';
+  if (others) return 'this computer and your other computers';
+  if (cloud) return 'this computer and Claude cloud sessions';
+  return 'this computer';
+}
+
+export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28) {
   const providers = (['codex', 'claude'] as const).filter(provider => enabled[provider]);
-  const intro = `<p class="support">Compares how far each allowance moved with the tokens seen on this computer over the last 28 days. Token types are weighted by the provider's published prices, and the baseline rate comes from your most efficient days. Anything above it is <strong>unattributed</strong>: cloud sessions, chat and mobile apps, background agents such as Claude Duet, tasks started by ChatGPT Dots, or other computers. A provider change shows as a rate shift.</p>
+  const intro = `<p class="support">Compares how far each allowance moved over the last ${days} days with the tokens m-dash observed on ${observedFrom(ledgers)}. Token types are weighted by the provider's published prices, and the baseline rate comes from your most efficient days. Anything above it is <strong>unattributed</strong>: usage m-dash did not see, such as chat and mobile apps, background agents such as Claude Duet, tasks started by ChatGPT Dots, Codex cloud tasks, or computers and cloud sessions not on your usage channel. A plan or provider change shows as a rate shift.</p>
     ${localLogs ? '' : '<p class="warning-text">Turn on <strong>Local session logs</strong> in Settings for Codex token detail and Claude sessions run while m-dash was closed.</p>'}
     ${enabled.claude && !claudeFeed ? '<p class="warning-text">Enable the Claude local feed in Settings for cost, cloud-session and subagent detail.</p>' : ''}`;
   if (!providers.length) return `<section class="panel"><h2>Allowance vs tokens</h2>${intro}<p class="empty">Enable Codex or Claude in Settings.</p></section>`;
-  return `<section class="panel"><div class="section-heading"><h2>Allowance vs tokens</h2><button id="copy-ledger" class="text-button">Copy daily CSV</button></div>${intro}</section>
+  return `<section class="panel"><div class="section-heading"><h2>Allowance vs tokens</h2><div class="ledger-actions">${rangePicker(days)}<button id="copy-ledger" class="text-button">Copy daily CSV</button></div></div>${intro}</section>
     ${providers.map(provider => {
       const ledger = ledgers[provider];
       const name = provider === 'codex' ? 'Codex' : 'Claude';
