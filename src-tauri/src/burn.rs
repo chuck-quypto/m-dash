@@ -8,6 +8,7 @@
 //! as unattributed rather than as an error.
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 const DAY: i64 = 86_400;
 /// Days with fewer weighted tokens than this give too noisy a ratio to fit.
@@ -108,10 +109,21 @@ fn date(at: i64) -> String {
 
 /// A stretch between two readings of one window that moved, with the usage observed in it.
 struct Segment {
+    start: i64,
     end: i64,
     points: f64,
     weighted: f64,
     cost: Option<f64>,
+}
+
+fn starts_new_window(from: &Reading, reading: &Reading) -> bool {
+    // A small drop can be mixed precision (a poll's 41 after a log's 41.3).
+    reading.used < from.used - 1.0
+        || matches!((from.resets_at, reading.resets_at), (Some(a), Some(b)) if (a - b).abs() > 600)
+}
+
+fn usage_between(usage: &[Usage], start: i64, end: i64) -> &[Usage] {
+    &usage[usage.partition_point(|row| row.at <= start)..usage.partition_point(|row| row.at <= end)]
 }
 
 /// Splits a window's readings into stretches that each end where the percentage changed.
@@ -131,11 +143,7 @@ fn segments(
             start = Some(reading);
             continue;
         };
-        // Sources round differently (a poll's 41 after a log's 41.3), so a drop under one
-        // point is noise; a larger drop or a new reset time is a new window.
-        let reset = reading.used < from.used - 1.0
-            || matches!((from.resets_at, reading.resets_at), (Some(a), Some(b)) if (a - b).abs() > 600);
-        if reset {
+        if starts_new_window(from, reading) {
             start = Some(reading);
             continue;
         }
@@ -143,8 +151,7 @@ fn segments(
             continue;
         }
         // `usage` is sorted by time, so each stretch is one contiguous slice.
-        let window = &usage[usage.partition_point(|row| row.at <= from.at)
-            ..usage.partition_point(|row| row.at <= reading.at)];
+        let window = usage_between(usage, from.at, reading.at);
         let weighted: f64 = window.iter().map(|row| weighted(provider, row)).sum();
         let cost = window
             .iter()
@@ -156,6 +163,7 @@ fn segments(
             idle.push(reading.at);
         }
         segments.push(Segment {
+            start: from.at,
             end: reading.at,
             points,
             weighted,
@@ -217,6 +225,130 @@ fn in_scope(window: &str, model: &str) -> bool {
     } else {
         !window.contains("cowork")
     }
+}
+
+fn away_source(row: &Usage) -> (&str, &str) {
+    let purpose = match row.query_source.as_str() {
+        "main" | "repl_main_thread" => "",
+        purpose => purpose,
+    };
+    (&row.surface, purpose)
+}
+
+/// Reviews a chosen period using only readings inside it and rates fitted before it.
+pub fn away_usage(
+    provider: Provider,
+    labels: &BTreeMap<String, String>,
+    readings: &[Reading],
+    usage: &[Usage],
+    plan_changes: &[i64],
+    span: RangeInclusive<i64>,
+) -> Value {
+    let mut usage = usage.to_vec();
+    usage.sort_by_key(|row| row.at);
+    let mut observed = BTreeMap::new();
+    for row in usage.iter().filter(|row| span.contains(&row.at)) {
+        let (requests, tokens) = observed.entry(away_source(row)).or_insert((0, 0));
+        *requests += 1;
+        *tokens += row.input + row.output + row.cache_read + row.cache_write;
+    }
+    let mut observed: Vec<_> = observed.into_iter().collect();
+    observed.sort_by_key(|(_, (_, tokens))| std::cmp::Reverse(*tokens));
+
+    let mut windows: BTreeMap<&str, Vec<&Reading>> =
+        labels.keys().map(|id| (id.as_str(), Vec::new())).collect();
+    for reading in readings.iter().filter(|row| row.at <= *span.end()) {
+        windows.entry(&reading.window).or_default().push(reading);
+    }
+    let plan_at = |at| {
+        plan_changes
+            .iter()
+            .copied()
+            .filter(|mark| *mark <= at)
+            .max()
+    };
+    let prior_plan = plan_at(*span.start());
+    let mut summaries = Vec::new();
+    for (id, mut readings) in windows {
+        readings.sort_by_key(|row| row.at);
+        let (earlier, selected) =
+            readings.split_at(readings.partition_point(|row| row.at < *span.start()));
+        if selected.is_empty() && !labels.contains_key(id) {
+            continue;
+        }
+        let scoped: Vec<_> = usage
+            .iter()
+            .filter(|row| in_scope(id, &row.model))
+            .cloned()
+            .collect();
+        let mut daily = BTreeMap::<i64, (f64, f64)>::new();
+        let same_window = |from: &&Reading, to: &&Reading| {
+            !starts_new_window(from, to)
+                && from.resets_at.is_none_or(|reset| to.at < reset)
+                && plan_at(from.at) == plan_at(to.at)
+        };
+        let prior =
+            &earlier[earlier.partition_point(|row| prior_plan.is_some_and(|at| row.at < at))..];
+        for chunk in prior.chunk_by(same_window) {
+            for step in segments(chunk, &scoped, provider).0 {
+                let day = daily.entry(step.end.div_euclid(DAY)).or_default();
+                day.0 += step.points;
+                day.1 += step.weighted;
+            }
+        }
+        let rate = baseline(&daily.into_values().collect::<Vec<_>>());
+        let mut points = 0.0;
+        let mut first_reading = None;
+        let mut last_reading = None;
+        let mut by_source = BTreeMap::new();
+        let mut covered_pairs = 0;
+        for chunk in selected
+            .chunk_by(same_window)
+            .filter(|chunk| chunk.len() >= 2)
+        {
+            first_reading.get_or_insert(chunk[0].at);
+            last_reading = chunk.last().map(|row| row.at);
+            covered_pairs += chunk.len() - 1;
+            for step in segments(chunk, &scoped, provider).0 {
+                points += step.points;
+                if let Some(rate) =
+                    rate.filter(|_| plan_at(step.start) == prior_plan && step.weighted > 0.0)
+                {
+                    let points_per_weight = rate.min(step.points / step.weighted);
+                    for row in usage_between(&scoped, step.start, step.end) {
+                        *by_source.entry(away_source(row)).or_insert(0.0) +=
+                            points_per_weight * weighted(provider, row);
+                    }
+                }
+            }
+        }
+        let mut sources: Vec<_> = by_source
+            .into_iter()
+            .filter(|(_, value)| *value > 0.0)
+            .collect();
+        sources.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let attributed: f64 = sources.iter().map(|(_, points)| points).sum();
+        let label = labels.get(id).cloned().unwrap_or_else(|| match id {
+            "five_hour" => "5-hour allowance".into(),
+            "seven_day" => "7-day allowance".into(),
+            _ => id.replace('_', " "),
+        });
+        summaries.push(json!({
+            "label":label, "points":first_reading.map(|_| points),
+            "attributed":attributed, "unexplained":(points - attributed).max(0.0),
+            "firstReading":first_reading, "lastReading":last_reading,
+            "breaks":selected.len().saturating_sub(1) - covered_pairs, "hasRate":rate.is_some(),
+            "sources": sources.into_iter().map(|((surface, purpose), points)| json!({
+                "surface":surface, "purpose":purpose, "points":points
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    json!({
+        "windows":summaries,
+        "observed":observed.into_iter().map(|((surface, purpose), (requests, tokens))| json!({
+            "surface":surface, "purpose":purpose, "requests":requests, "tokens":tokens
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// The baseline rate for each day: from the days in its own plan period (between breaks) when
@@ -408,6 +540,99 @@ pub fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn away_review_explains_part_of_an_allowance_step_with_local_and_cloud_usage() {
+        let reading = |at, used| Reading {
+            window: "seven_day".into(),
+            at,
+            used,
+            resets_at: None,
+        };
+        let request = |at, surface: &str, input| Usage {
+            at,
+            surface: surface.into(),
+            input,
+            ..Default::default()
+        };
+        let start = 4 * DAY;
+        let readings = [
+            reading(DAY, 0.0),
+            reading(DAY + 300, 2.0),
+            reading(2 * DAY + 300, 4.0),
+            reading(3 * DAY + 300, 6.0),
+            reading(start - 60, 8.0),
+            reading(start + 60, 10.0),
+            reading(start + 360, 19.0),
+        ];
+        let usage = [
+            request(DAY + 100, "cli", 100_000),
+            request(2 * DAY + 100, "cli", 100_000),
+            request(3 * DAY + 100, "cli", 100_000),
+            request(start + 30, "cli", 500_000),
+            request(start + 120, "cli", 100_000),
+            request(start + 180, "cloud", 200_000),
+        ];
+        let result = away_usage(
+            Provider::Claude,
+            &BTreeMap::new(),
+            &readings,
+            &usage,
+            &[],
+            start..=start + 600,
+        );
+        let window = &result["windows"][0];
+        assert_eq!(window["points"].as_f64(), Some(9.0));
+        assert_eq!(window["unexplained"].as_f64(), Some(3.0));
+        assert_eq!(window["firstReading"], start + 60);
+        assert_eq!(window["lastReading"], start + 360);
+        assert_eq!(window["sources"][0]["surface"], "cloud");
+        assert_eq!(window["sources"][0]["points"].as_f64(), Some(4.0));
+        assert_eq!(window["sources"][1]["surface"], "cli");
+        assert_eq!(window["sources"][1]["points"].as_f64(), Some(2.0));
+        assert_eq!(result["observed"][0]["surface"], "cli");
+        assert_eq!(result["observed"][0]["tokens"], 600_000);
+    }
+
+    #[test]
+    fn away_review_skips_reset_boundaries_and_keeps_usage_without_a_baseline() {
+        let reading = |window: &str, at, used, reset| Reading {
+            window: window.into(),
+            at,
+            used,
+            resets_at: Some(reset),
+        };
+        let readings = [
+            reading("five_hour", 100, 80.0, 500),
+            reading("five_hour", 200, 87.0, 500),
+            reading("five_hour", 510, 4.0, 18_510),
+            reading("five_hour", 600, 7.0, 18_510),
+            reading("seven_day", 500, 15.0, 604_800),
+        ];
+        let usage = [Usage {
+            at: 550,
+            surface: "other:cli@Studio Mac".into(),
+            query_source: "subagent".into(),
+            input: 100_000,
+            ..Default::default()
+        }];
+        let result = away_usage(
+            Provider::Claude,
+            &BTreeMap::new(),
+            &readings,
+            &usage,
+            &[],
+            50..=650,
+        );
+        let first = &result["windows"][0];
+        assert_eq!(first["points"].as_f64(), Some(10.0));
+        assert_eq!(first["unexplained"].as_f64(), Some(10.0));
+        assert_eq!(first["breaks"], 1);
+        assert_eq!(first["hasRate"], false);
+        assert_eq!(result["windows"][1]["points"], Value::Null);
+        assert_eq!(result["observed"][0]["surface"], "other:cli@Studio Mac");
+        assert_eq!(result["observed"][0]["purpose"], "subagent");
+    }
 
     #[test]
     fn claude_tokens_are_scaled_by_model_price() {

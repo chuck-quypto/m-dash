@@ -99,6 +99,10 @@ Choose **On · turn off** to stop future pings. An already submitted request may
 
 ## Allowance vs tokens
 
+Use **While you were away** to review a period within the last 90 days. Set the start and end in your device's local time, then select **Review usage**. For each connected Codex or Claude account, the review shows observed percentage-point increases in each window and estimates how much the recorded local, other-computer, and cloud usage explains. The estimate uses earlier readings from the same plan. The report also shows the requests and tokens recorded in the whole period, including activity outside comparable readings.
+
+Only readings within the selected period are compared. Resets, plan changes, and gaps in collection can hide movement. Unexplained points may reflect usage m-dash cannot see, delayed or rounded readings, or insufficient data to estimate attribution. Each allowance window is its own measure. The same request can affect more than one window.
+
 **Allowance vs tokens** compares how far each Codex and Claude allowance moved over the last 7, 28 or 90 days (pick the range at the top of the page) with the tokens m-dash observed. Without a usage channel that is this computer only; with one it also includes your other computers and Claude cloud sessions. Usage m-dash can't see, such as chat and mobile apps, Codex cloud tasks or computers not on the channel, shows as *unattributed*. A note appears when the points-per-token rate shifts; a plan change, a provider change or more usage elsewhere can all cause one. Under **Plan changes and notes**, m-dash lists the plan changes it saw, and you can add ones it can't see (for example a move between two price tiers that report the same plan name) or plain notes. Each plan period gets its own rate. Turn on **Local session logs** in Settings for per-request detail. To count Claude Code cloud sessions and your other computers, follow [Cloud sessions and other computers](CLOUD_USAGE.md), which walks through deploying your own relay and setting up the cloud environment.
 
 ## Usage log

@@ -999,32 +999,43 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
     Ok(dashboard)
 }
 
-/// Rebuilds the burn ledgers for the enabled, signed-in Codex and Claude accounts.
-fn update_consistency(inner: &mut Inner, now: u64) {
-    let providers = inner.dashboard.settings.providers.clone();
-    let mut ledgers = serde_json::Map::new();
-    for (name, enabled, snapshot, provider) in [
+fn ledger_snapshots(
+    dashboard: &Dashboard,
+) -> impl Iterator<Item = (&'static str, &serde_json::Value, burn::Provider)> {
+    let providers = &dashboard.settings.providers;
+    [
         (
             "codex",
             providers.codex,
-            &inner.dashboard.snapshot,
+            &dashboard.snapshot,
             burn::Provider::Codex,
         ),
         (
             "claude",
             providers.claude,
-            &inner.dashboard.claude,
+            &dashboard.claude,
             burn::Provider::Claude,
         ),
-    ] {
-        if let Some(snapshot) = snapshot.as_ref().filter(|_| enabled) {
-            if let Ok(ledger) =
-                inner
-                    .store
-                    .consistency(provider, snapshot, now, inner.dashboard.ledger_days)
-            {
-                ledgers.insert(name.into(), ledger);
-            }
+    ]
+    .into_iter()
+    .filter_map(|(name, enabled, snapshot, provider)| {
+        snapshot
+            .as_ref()
+            .filter(|_| enabled)
+            .map(|snapshot| (name, snapshot, provider))
+    })
+}
+
+/// Rebuilds the burn ledgers for the enabled, signed-in Codex and Claude accounts.
+fn update_consistency(inner: &mut Inner, now: u64) {
+    let mut ledgers = serde_json::Map::new();
+    for (name, snapshot, provider) in ledger_snapshots(&inner.dashboard) {
+        if let Ok(ledger) =
+            inner
+                .store
+                .consistency(provider, snapshot, now, inner.dashboard.ledger_days)
+        {
+            ledgers.insert(name.into(), ledger);
         }
     }
     inner.dashboard.consistency = serde_json::Value::Object(ledgers);
@@ -1032,6 +1043,34 @@ fn update_consistency(inner: &mut Inner, now: u64) {
         computers["name"] = serde_json::json!(device_name(&inner.store));
         inner.dashboard.computers = computers;
     }
+}
+
+#[tauri::command]
+async fn review_away_usage(
+    app: tauri::AppHandle,
+    start: i64,
+    end: i64,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let inner = state
+            .0
+            .lock()
+            .map_err(|_| "The collector state is unavailable.")?;
+        let now = collector::now();
+        let mut accounts = serde_json::Map::new();
+        for (name, snapshot, provider) in ledger_snapshots(&inner.dashboard) {
+            accounts.insert(
+                name.into(),
+                inner
+                    .store
+                    .away_usage(provider, snapshot, now, start..=end)?,
+            );
+        }
+        Ok(serde_json::Value::Object(accounts))
+    })
+    .await
+    .map_err(|_| "Could not review allowance usage.")?
 }
 
 /// This computer's name on the usage channel: the owner's choice, or the system's name.
@@ -1148,7 +1187,7 @@ pub fn run() {
         }))
         .manage(CompactState::default())
         .manage(mobile_sync::State::default())
-        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, set_ledger_days, add_ledger_mark, remove_ledger_mark, set_device_name, usage_list, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
+        .invoke_handler(tauri::generate_handler![mobile_sync::sync_relay,mobile_sync::sync_status,mobile_sync::sync_pair,mobile_sync::sync_approve,mobile_sync::sync_revoke,get_dashboard, get_compact_dashboard, set_ledger_days, add_ledger_mark, remove_ledger_mark, set_device_name, review_away_usage, usage_list, open_dashboard, refresh_dashboard,save_settings,set_claude_enabled,set_claude_ping,connect_openrouter,disconnect_openrouter,open_openrouter_settings,usage_relay::usage_relay_status,usage_relay::usage_relay_create,usage_relay::usage_relay_join,usage_relay::usage_relay_leave])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             macos_lifecycle::install(app.handle());

@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 const DAY: u64 = 86_400;
@@ -528,10 +529,41 @@ impl Store {
         now: u64,
         days: u64,
     ) -> Result<Value, String> {
+        self.ledger(provider, snapshot, now, days, None)
+    }
+
+    pub fn away_usage(
+        &self,
+        provider: crate::burn::Provider,
+        snapshot: &Value,
+        now: u64,
+        span: RangeInclusive<i64>,
+    ) -> Result<Value, String> {
+        let days = LEDGER_DAYS[2];
+        if span.start() >= span.end()
+            || *span.start() < now.saturating_sub(days * DAY) as i64
+            || *span.end() > now as i64
+        {
+            return Err(
+                "Choose a start and end within the last 90 days, ending at or before now.".into(),
+            );
+        }
+        self.ledger(provider, snapshot, now, days, Some(span))
+    }
+
+    fn ledger(
+        &self,
+        provider: crate::burn::Provider,
+        snapshot: &Value,
+        now: u64,
+        days: u64,
+        away: Option<RangeInclusive<i64>>,
+    ) -> Result<Value, String> {
         let account = snapshot["accountId"]
             .as_str()
             .ok_or("Missing ledger account.")?;
         let since = now.saturating_sub(days * DAY) as i64;
+        let until = away.as_ref().map_or(i64::MAX, |span| *span.end());
         let mut labels = std::collections::BTreeMap::new();
         for window in snapshot["windows"].as_array().into_iter().flatten() {
             let (Some(id), Some(label)) = (window["id"].as_str(), window["label"].as_str()) else {
@@ -550,9 +582,9 @@ impl Store {
             labels.insert(id.to_owned(), label);
         }
         let error = |_| "Cannot read the usage ledger.".to_string();
-        let mut query = self.0.prepare("SELECT window,observed_at,used_percent,resets_at FROM limit_readings WHERE account=?1 AND observed_at>=?2 ORDER BY observed_at").map_err(error)?;
+        let mut query = self.0.prepare("SELECT window,observed_at,used_percent,resets_at FROM limit_readings WHERE account=?1 AND observed_at BETWEEN ?2 AND ?3 ORDER BY observed_at").map_err(error)?;
         let readings = query
-            .query_map(params![account, since], |row| {
+            .query_map(params![account, since, until], |row| {
                 Ok(crate::burn::Reading {
                     window: row.get(0)?,
                     at: row.get(1)?,
@@ -564,11 +596,11 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?
             .into_iter()
-            .filter(|reading| labels.contains_key(&reading.window))
+            .filter(|reading| away.is_some() || labels.contains_key(&reading.window))
             .collect::<Vec<_>>();
-        let mut query = self.0.prepare(&format!("SELECT occurred_at,{WHERE},COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at>=?2 ORDER BY occurred_at")).map_err(error)?;
+        let mut query = self.0.prepare(&format!("SELECT occurred_at,{WHERE},COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros FROM usage_events WHERE account=?1 AND occurred_at BETWEEN ?2 AND ?3 ORDER BY occurred_at")).map_err(error)?;
         let usage = query
-            .query_map(params![account, since], |row| {
+            .query_map(params![account, since, until], |row| {
                 Ok(crate::burn::Usage {
                     at: row.get(0)?,
                     surface: row.get(1)?,
@@ -584,6 +616,18 @@ impl Store {
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?;
+        let marks = self.ledger_marks(account, since)?;
+        let breaks: Vec<i64> = marks
+            .iter()
+            .filter(|mark| mark["kind"] == "plan")
+            .filter_map(|mark| mark["at"].as_i64())
+            .collect();
+        if let Some(span) = away {
+            let mut result =
+                crate::burn::away_usage(provider, &labels, &readings, &usage, &breaks, span);
+            result["account"] = json!(account);
+            return Ok(result);
+        }
         let mut server = std::collections::BTreeMap::new();
         if provider == crate::burn::Provider::Codex {
             let mut query = self
@@ -608,12 +652,6 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(error)?;
-        let marks = self.ledger_marks(account, since)?;
-        let breaks: Vec<i64> = marks
-            .iter()
-            .filter(|mark| mark["kind"] == "plan")
-            .filter_map(|mark| mark["at"].as_i64())
-            .collect();
         let mut result =
             crate::burn::analyze(provider, &labels, &readings, &usage, &server, &breaks);
         result["marks"] = json!(marks);
@@ -1713,6 +1751,22 @@ mod tests {
             .unwrap()
             .iter()
             .any(|row| row["surface"] == "other:cli@Studio Mac"));
+        let review = store
+            .away_usage(
+                crate::burn::Provider::Claude,
+                &json!({"accountId":"claude:one","windows":[]}),
+                now,
+                now as i64 - 60..=now as i64,
+            )
+            .unwrap();
+        let sources: Vec<_> = review["observed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["surface"].as_str().unwrap())
+            .collect();
+        assert_eq!(sources, ["cli", "cloud", "other:cli@Studio Mac"]);
+        assert_eq!(review["account"], "claude:one");
         let computers = store.computers().unwrap();
         assert_eq!(computers["others"][0]["name"], "Studio Mac");
         assert_eq!(computers["others"][0]["lastUsage"], now as i64);

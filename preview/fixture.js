@@ -51,6 +51,16 @@ window.__TAURI_INTERNALS__={
     if(command==='get_dashboard'||command==='refresh_dashboard')return structuredClone(state());
     if(command==='get_compact_dashboard')return compactRows();
     if(command==='usage_relay_status'||command==='sync_relay')return null;
+    if(command==='review_away_usage'){
+      const makeWindow=(label,points,sources)=>{const attributed=sources.reduce((sum,row)=>sum+row.points,0);return {label,points,sources,attributed,unexplained:points-attributed,firstReading:args.start+60,lastReading:args.end-60,breaks:0,hasRate:true};};
+      const codex={surface:'codex',purpose:'',requests:4,tokens:120000};
+      const terminal={surface:'cli',purpose:'main',requests:8,tokens:410000};
+      const cloud={surface:'cloud',purpose:'subagent',requests:5,tokens:200000};
+      return {
+        ...(settings.providers.codex?{codex:{account:'fixture',windows:[makeWindow('Codex · weekly',4,[{...codex,points:1.1}])],observed:[codex]}}:{}),
+        ...(settings.providers.claude?{claude:{account:'fixture',windows:[makeWindow('7-day allowance',12,[{...terminal,points:4},{...cloud,points:2}])],observed:[terminal,cloud]}}:{})
+      };
+    }
     if(command==='usage_list'){
       if(args.csv)return {csv:'time_utc,where\n',total:1,truncated:false};
       const places=['cli','desktop','cloud','other:cli@Studio Mac'];

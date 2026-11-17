@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
 import { emptyFilter, usageLogPage, type UsageFilter, type UsageList } from './usage-log';
-import { consistencyPage, ledgerCsv, remainingWorth, type Computers, type Ledgers } from './consistency';
+import { awayUsagePanel, consistencyPage, ledgerCsv, remainingWorth, type AwayAccounts, type AwayReview, type Computers, type Ledgers } from './consistency';
 import { alertMark, alertSentence, timeLeftSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
@@ -80,6 +80,32 @@ interface GrokSnapshot {
 const root = document.querySelector<HTMLDivElement>('#app')!;
 let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [], consistency: {}, usageRelayError: null };
 let page: 'overview' | 'history' | 'consistency' | 'usage' | 'connections' = 'overview';
+const localDateTime = (epoch: number) => new Date(epoch - new Date(epoch).getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+const away: AwayReview = { start: '', end: '', busy: false, error: '', result: null };
+let awayOpened = false;
+
+async function reviewAwayUsage() {
+  const start = new Date(away.start).getTime() / 1000;
+  const end = new Date(away.end).getTime() / 1000;
+  away.result = null;
+  away.error = '';
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end || end > Date.now() / 1000) {
+    away.error = 'Choose a start before the end, with both times at or before now.';
+    render();
+    return;
+  }
+  away.busy = true;
+  render();
+  try {
+    const accounts = await invoke<AwayAccounts>('review_away_usage', { start, end });
+    away.result = { start, end, accounts };
+  } catch (error) {
+    away.error = String(error);
+  } finally {
+    away.busy = false;
+    if (page === 'consistency') render();
+  }
+}
 let usageFilter: UsageFilter | null = null;
 let usageList: UsageList | null | undefined;
 let usageError: string | null = null;
@@ -282,6 +308,12 @@ async function usageRelayAction(command: string, args: Record<string, unknown>, 
   setupBusy = false; render();
 }
 function render() {
+  if (page === 'consistency' && !awayOpened) {
+    const now = Date.now();
+    away.start = localDateTime(now - 8 * 3600_000);
+    away.end = localDateTime(now);
+    awayOpened = true;
+  }
   const focused = document.activeElement as HTMLElement | null;
   const focusId = focused?.id;
   const focusPage = focused?.dataset.page;
@@ -291,9 +323,15 @@ function render() {
     <nav aria-label="Dashboard views">${(['overview', 'history', 'consistency', 'usage', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'consistency' ? 'Allowance vs tokens' : tab === 'usage' ? 'Usage log' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
     ${appError ? `<div class="error" role="alert">${escape(appError)}</div>` : ''}
     ${state.settings.providers.codex && state.error ? `<div class="error" role="status"><strong>Couldn’t refresh Codex.</strong> ${escape(state.error)}${state.snapshot ? ' Showing the last successful observation.' : ''}</div>` : ''}
-    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? noticeLine('ledger') + consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled, state.ledgerDays || 28, state.computers ?? {}, state.usageChannel ?? false) : page === 'usage' ? usageLogPage(currentUsageFilter(), usageList, usageError, ledgerProviders(), state.consistency ?? {}) : connections()}
+    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? noticeLine('ledger') + awayUsagePanel(away, state.consistency, state.settings.providers) + consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled, state.ledgerDays || 28, state.computers ?? {}, state.usageChannel ?? false) : page === 'usage' ? usageLogPage(currentUsageFilter(), usageList, usageError, ledgerProviders(), state.consistency ?? {}) : connections()}
     <footer><span>m-dash ${escape(appVersion)} · Use the tray to open, refresh or quit</span><span>${state.nextRefresh ? `Next refresh ${dateTime(state.nextRefresh)}` : enabledCount ? 'Connect an account to collect readings' : 'Collection paused'}</span></footer></main>`;
   root.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => { void refresh(); });
+  root.querySelector<HTMLInputElement>('#away-start')?.addEventListener('input', event => { away.start = (event.target as HTMLInputElement).value; });
+  root.querySelector<HTMLInputElement>('#away-end')?.addEventListener('input', event => { away.end = (event.target as HTMLInputElement).value; });
+  root.querySelector<HTMLFormElement>('#away-review')?.addEventListener('submit', event => {
+    event.preventDefault();
+    if (!away.busy) void reviewAwayUsage();
+  });
   root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; if (page === 'usage') { usageList = undefined; void loadUsage(); } render(); }));
   root.querySelectorAll<HTMLElement>('[data-usage-provider]').forEach(element => {
     const open = () => showUsage({ provider: element.dataset.usageProvider as 'codex' | 'claude', ...(element.dataset.usageDay ? { date: element.dataset.usageDay, where: '', model: '', purpose: '' } : { date: '', where: element.dataset.usageWhere ?? '', model: element.dataset.usageModel ?? '', purpose: element.dataset.usagePurpose ?? '' }) });

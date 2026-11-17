@@ -6,6 +6,9 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+### Added
+- **While you were away** reviews a chosen period for connected Codex and Claude accounts, showing observed allowance increases, estimated contributions from recorded sources, and unexplained movement.
+
 ## [0.6.0-rc.1] - 2026-11-08
 
 First release candidate for 0.6.0, which turns m-dash from a per-computer
