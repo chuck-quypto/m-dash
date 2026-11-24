@@ -40,22 +40,37 @@ pub struct Usage {
 pub enum Provider {
     Claude,
     Codex,
+    Antigravity,
 }
 
 /// Relative price of each token type against fresh input, from the providers' published
-/// price lists: Anthropic API prices for Claude and the Codex credit rate card for Codex
-/// (which counts reasoning inside output). Claude tokens are also scaled by their model's
-/// price (see `claude_model_factor`); Codex model differences are not applied.
+/// price lists: Anthropic API prices for Claude, the Codex credit rate card for Codex
+/// (which counts reasoning inside output), and Gemini API list ratios for Antigravity.
 fn weighted(provider: Provider, usage: &Usage) -> f64 {
     let (output, read, write, model) = match provider {
         Provider::Claude => (5.0, 0.1, 1.25, claude_model_factor(&usage.model)),
         Provider::Codex => (6.0, 0.1, 1.0, 1.0),
+        Provider::Antigravity => (5.0, 0.1, 1.0, antigravity_model_factor(&usage.model)),
     };
     model
         * (usage.input as f64
             + output * usage.output as f64
             + read * usage.cache_read as f64
             + write * usage.cache_write as f64)
+}
+
+fn antigravity_model_factor(model: &str) -> f64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("claude") {
+        return claude_model_factor(&m);
+    }
+    if m.contains("flash") || m.contains("hydrogen") {
+        return 0.25;
+    }
+    if m.contains("argon") {
+        return 0.5;
+    }
+    1.0
 }
 
 /// The first two numbers after `family-` in a model ID, such as (4, 1) for
@@ -222,6 +237,10 @@ fn in_scope(window: &str, model: &str) -> bool {
         model.contains("opus")
     } else if window.contains("sonnet") {
         model.contains("sonnet")
+    } else if window.starts_with("gemini-") {
+        model.contains("gemini")
+    } else if window.starts_with("3p-") {
+        !model.is_empty() && !model.contains("gemini")
     } else {
         !window.contains("cowork")
     }
@@ -833,5 +852,15 @@ mod tests {
         assert_eq!(split["rateRange"], json!([20.0, 20.0]));
         assert_eq!(mixed["rateDays"], 8);
         assert_eq!(mixed["rateRange"], json!([10.0, 10.0]));
+    }
+
+    #[test]
+    fn antigravity_windows_scope_gemini_and_third_party_models_separately() {
+        assert!(in_scope("gemini-5h", "gemini-4-neon-high"));
+        assert!(!in_scope("gemini-5h", "claude-opus-5-5-high"));
+        assert!(in_scope("3p-weekly", "claude-opus-5-5-high"));
+        assert!(in_scope("3p-5h", "gpt-oss-120b-medium"));
+        assert!(!in_scope("3p-weekly", "gemini-4-hydrogen-high"));
+        assert!(!in_scope("3p-weekly", ""));
     }
 }

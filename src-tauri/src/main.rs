@@ -4,6 +4,11 @@ fn main() {
         m_dash_lib::claude_feed::run();
         return;
     }
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--antigravity-capture"))
+    {
+        m_dash_lib::antigravity::run_capture();
+        return;
+    }
     #[cfg(target_os = "linux")]
     if std::env::var_os("GDK_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
         // Native Wayland cannot provide the strip's minimize/position/stacking contract.

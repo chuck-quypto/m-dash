@@ -5,7 +5,7 @@ const listeners = new Map();
 const now = () => Math.floor(Date.now()/1000);
 let ledgerRange = 28;
 let deviceName = 'Windows PC';
-let settings = {providers:{codex:true,claude:true,grok:true,openrouter:true},compactWindows:null,localLogs:false};
+let settings = {providers:{codex:true,claude:true,grok:true,openrouter:true,antigravity:true},compactWindows:null,localLogs:false};
 const state = () => ({
   settings,needsSetup:false,
   claudePing:{enabled:false,message:'Off. No automatic model requests.',lastAttempt:null,lastTokens:null},
@@ -20,7 +20,8 @@ const state = () => ({
     {id:'codex/secondary',label:'Codex',durationMins:10080,remainingPercent:65,usedPercent:35,resetsAt:now()+172800,blocked:false}
   ],credits:[],availableResets:null,resetDetails:[],lifetimeTokens:1200000,peakDailyTokens:50000,dailyUsage:[{date:'2026-10-12',tokens:20000},{date:'2026-10-13',tokens:50000}],usageError:null},
   claude:{observedAt:now(),quotaObservedAt:now(),source:'Claude Code account usage',windows:[{id:'five_hour',label:'Five-hour allowance',durationMins:300,remainingPercent:45,usedPercent:55,resetsAt:now()+4000}],observedTokens:10,observedSince:now()-3600,lastTokenAt:now(),dailyUsage:[]},
-  grok:{observedAt:now(),plan:'Synthetic fixture',remainingPercent:75,prepaidCents:1000,onDemandCapCents:null,onDemandUsedCents:null,periodEnd:new Date((now()+172800)*1000).toISOString()},openrouter:null
+  grok:{observedAt:now(),plan:'Synthetic fixture',remainingPercent:75,prepaidCents:1000,onDemandCapCents:null,onDemandUsedCents:null,periodEnd:new Date((now()+172800)*1000).toISOString()},openrouter:null,
+  antigravity:{observedAt:now(),plan:'Google AI Ultra',source:'Antigravity CLI',windows:[{id:'gemini-5h',label:'Gemini',durationMins:300,remainingPercent:88,usedPercent:12,resetsAt:now()+12000,blocked:false},{id:'gemini-weekly',label:'Gemini',durationMins:10080,remainingPercent:96,usedPercent:4,resetsAt:now()+500000,blocked:false},{id:'3p-5h',label:'Claude & GPT',durationMins:300,remainingPercent:100,usedPercent:0,resetsAt:now()+18000,blocked:false}],credits:[],observedTokens:142000,observedSince:now()-7200,lastTokenAt:now()-120,dailyUsage:[{date:'2026-10-13',tokens:142000}]}
 });
 const ledgerDays=(seed,hidden)=>Array.from({length:21},(_,i)=>{const date=new Date(Date.UTC(2026,9,8+i)).toISOString().slice(0,10);const weighted=200000+((i*seed)%7)*60000;const explained=weighted*1e-5;const unattributed=i>=hidden?2+(i%3):0;return {date,points:explained+unattributed,weighted,explained,unattributed};});
 const ledgerWindow=(id,label,seed,hidden,change)=>{const days=ledgerDays(seed,hidden);const points=days.reduce((s,d)=>s+d.points,0);const explained=days.reduce((s,d)=>s+d.explained,0);return {id,label,enough:true,activeDays:21,pointsPerMillion:10,pointsPerDollar:id.startsWith('codex')?null:0.8,rateDays:id==='codex/secondary'?7:21,rateRange:[8,12],points,explained,unattributed:points-explained,idlePoints:6,idleSteps:[now()-3600*3,now()-3600*27,now()-3600*51,now()-3600*75],change,days};};
@@ -36,7 +37,7 @@ const consistency={
     cacheReadShare:0.91,serverVsLocal:[]}};
 const alerts={codexFiveHour:{alert:'critical',alertReason:'pace',runsOutAt:now()+2400,surgeRatio:null},codexWeekly:{alert:'surge',alertReason:'surge',runsOutAt:now()+117000,surgeRatio:2.4},claudeFiveHour:{alert:'warning',alertReason:'pace',runsOutAt:now()+3600,surgeRatio:null}};
 function compactRows(){
-  const choices={codexFiveHour:['codex','Codex','5h',20],codexWeekly:['codex','Codex','wk',65],claudeFiveHour:['claude','Claude','5h',45],claudeWeekly:['claude','Claude','wk',null],grokAllowance:['grok','Grok','wk',75]};
+  const choices={codexFiveHour:['codex','Codex','5h',20],codexWeekly:['codex','Codex','wk',65],claudeFiveHour:['claude','Claude','5h',45],claudeWeekly:['claude','Claude','wk',null],grokAllowance:['grok','Grok','wk',75],antigravityGeminiFiveHour:['antigravity','Antigravity','5h',88],antigravityGeminiWeekly:['antigravity','Antigravity','wk',96],antigravityThirdPartyFiveHour:['antigravity','Antigravity 3P','5h',100],antigravityThirdPartyWeekly:['antigravity','Antigravity 3P','wk',100]};
   return (settings.compactWindows||['codexFiveHour','claudeFiveHour','grokAllowance','codexWeekly']).filter(id=>settings.providers[choices[id][0]]).slice(0,4).map(id=>({label:choices[id][1],period:choices[id][2],remainingPercent:choices[id][3],resetsAt:now()+7200,observedAt:now(),status:choices[id][3]===null?'unavailable':'fresh',...alerts[id]}));
 }
 window.previewUpdate=()=>{ for(const [event, callback] of listeners) callbacks.get(callback)?.({event,id:1,payload:event==='compact-updated'?compactRows():state()}); };

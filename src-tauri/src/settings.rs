@@ -7,6 +7,7 @@ pub enum Provider {
     Claude,
     Grok,
     Openrouter,
+    Antigravity,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +17,8 @@ pub struct Providers {
     pub claude: bool,
     pub grok: bool,
     pub openrouter: bool,
+    #[serde(default)]
+    pub antigravity: bool,
 }
 
 impl Providers {
@@ -25,11 +28,12 @@ impl Providers {
             Provider::Claude => self.claude,
             Provider::Grok => self.grok,
             Provider::Openrouter => self.openrouter,
+            Provider::Antigravity => self.antigravity,
         }
     }
 
     pub fn any(&self) -> bool {
-        self.codex || self.claude || self.grok || self.openrouter
+        self.codex || self.claude || self.grok || self.openrouter || self.antigravity
     }
 }
 
@@ -41,6 +45,10 @@ pub enum CompactWindow {
     ClaudeFiveHour,
     ClaudeWeekly,
     GrokAllowance,
+    AntigravityGeminiFiveHour,
+    AntigravityGeminiWeekly,
+    AntigravityThirdPartyFiveHour,
+    AntigravityThirdPartyWeekly,
 }
 
 impl CompactWindow {
@@ -49,6 +57,10 @@ impl CompactWindow {
             Self::CodexFiveHour | Self::CodexWeekly => Provider::Codex,
             Self::ClaudeFiveHour | Self::ClaudeWeekly => Provider::Claude,
             Self::GrokAllowance => Provider::Grok,
+            Self::AntigravityGeminiFiveHour
+            | Self::AntigravityGeminiWeekly
+            | Self::AntigravityThirdPartyFiveHour
+            | Self::AntigravityThirdPartyWeekly => Provider::Antigravity,
         }
     }
 }

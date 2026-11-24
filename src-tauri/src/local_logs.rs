@@ -18,6 +18,9 @@ const HORIZON: u64 = 90 * 86_400;
 pub enum Kind {
     Codex,
     Claude,
+    AntigravityCli,
+    AntigravityDesktop,
+    AntigravityIde,
 }
 
 /// Where a file was left and the running state needed to continue it.
@@ -50,6 +53,9 @@ pub fn root(kind: Kind) -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| home().map(|home| home.join(".claude")))
             .map(|base| base.join("projects")),
+        Kind::AntigravityCli => home().map(|home| home.join(".gemini/antigravity-cli/brain")),
+        Kind::AntigravityDesktop => home().map(|home| home.join(".gemini/antigravity/brain")),
+        Kind::AntigravityIde => home().map(|home| home.join(".gemini/antigravity-ide/brain")),
     }
 }
 
@@ -140,6 +146,11 @@ pub fn scan(
                 match kind {
                     Kind::Codex => codex_line(&line, &mut cursor.state, &mut result),
                     Kind::Claude => claude_line(&line, &mut result),
+                    Kind::AntigravityCli => antigravity_line(&line, &path, "agy-cli", &mut result),
+                    Kind::AntigravityDesktop => {
+                        antigravity_line(&line, &path, "agy-desktop", &mut result)
+                    }
+                    Kind::AntigravityIde => antigravity_line(&line, &path, "agy-ide", &mut result),
                 }
             }
         }
@@ -304,6 +315,76 @@ fn claude_line(line: &[u8], result: &mut Scan) {
     ));
 }
 
+fn antigravity_conversation_id(path: &Path) -> String {
+    // Expected: .../<conversation_id>/.system_generated/logs/transcript.jsonl
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    if let Some(pos) = parts.iter().rposition(|p| *p == ".system_generated") {
+        if pos > 0 && !parts[pos - 1].is_empty() {
+            return parts[pos - 1].to_owned();
+        }
+    }
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+fn antigravity_effort(model: &str) -> Option<String> {
+    for suffix in ["xhigh", "high", "medium", "low", "max"] {
+        if model.ends_with(&format!("-{suffix}")) {
+            return Some(suffix.to_owned());
+        }
+    }
+    None
+}
+
+fn antigravity_line(line: &[u8], path: &Path, surface: &str, result: &mut Scan) {
+    if !contains(line, b"\"PLANNER_RESPONSE\"") || !contains(line, b"\"input_tokens\"") {
+        return;
+    }
+    if path.file_name().and_then(|n| n.to_str()) != Some("transcript.jsonl") {
+        return;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+        return;
+    };
+    if value["type"] != "PLANNER_RESPONSE" || value["status"] != "DONE" {
+        return;
+    }
+    let (Some(at), Some(step)) = (
+        timestamp(&value["created_at"]),
+        value["step_index"].as_i64().filter(|n| *n >= 0),
+    ) else {
+        return;
+    };
+    let input = amount(&value["input_tokens"]);
+    let output = amount(&value["output_tokens"]);
+    let cache_read = amount(&value["cache_read_tokens"]);
+    if input + output + cache_read == 0 {
+        return;
+    }
+    let model = label(&value["model"]);
+    let effort = model.as_deref().and_then(antigravity_effort);
+    let conversation = antigravity_conversation_id(path);
+    result.requests.push((
+        format!("agy:{conversation}:{step}"),
+        at,
+        Request {
+            surface: surface.into(),
+            model,
+            effort,
+            query_source: Some("main".into()),
+            input,
+            output,
+            cache_read,
+            ..Default::default()
+        },
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +518,48 @@ mod tests {
             ),
             (3, 7, 900, 60)
         );
+        assert!(!format!("{:?}", found.requests).contains("private"));
+    }
+
+    #[test]
+    fn antigravity_transcripts_parse_done_planner_responses_and_effort() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("conv-abc-123/.system_generated/logs/transcript.jsonl");
+        write(
+            &path,
+            &[
+                json!({"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-24T19:59:20Z","content":"private prompt"}),
+                json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"ACTIVE","created_at":"2026-11-24T19:59:21Z","model":"gemini-4-neon-high","input_tokens":500,"output_tokens":10,"cache_read_tokens":0}),
+                json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-24T19:59:22Z","model":"gemini-4-neon-high","input_tokens":2800,"output_tokens":900,"cache_read_tokens":9800,"thinking":"private thought"}),
+                json!({"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-24T19:59:30Z","model":"claude-opus-5-5-medium","input_tokens":1000,"output_tokens":200,"cache_read_tokens":4000}),
+            ],
+        );
+        let found = scan(
+            Kind::AntigravityCli,
+            directory.path(),
+            &HashMap::new(),
+            crate::collector::now(),
+        );
+        assert_eq!(found.requests.len(), 2);
+        assert_eq!(found.requests[0].0, "agy:conv-abc-123:1");
+        assert_eq!(found.requests[0].2.surface, "agy-cli");
+        assert_eq!(
+            found.requests[0].2.model.as_deref(),
+            Some("gemini-4-neon-high")
+        );
+        assert_eq!(found.requests[0].2.effort.as_deref(), Some("high"));
+        assert_eq!(
+            (
+                found.requests[0].2.input,
+                found.requests[0].2.output,
+                found.requests[0].2.cache_read
+            ),
+            (2800, 900, 9800)
+        );
+        assert_eq!(found.requests[1].0, "agy:conv-abc-123:2");
+        assert_eq!(found.requests[1].2.effort.as_deref(), Some("medium"));
         assert!(!format!("{:?}", found.requests).contains("private"));
     }
 }

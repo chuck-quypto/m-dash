@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { openMobileSync } from './mobile-sync';
 import { emptyFilter, usageLogPage, type UsageFilter, type UsageList } from './usage-log';
-import { awayUsagePanel, consistencyPage, ledgerCsv, remainingWorth, type AwayAccounts, type AwayReview, type Computers, type Ledgers } from './consistency';
+import { awayUsagePanel, consistencyPage, ledgerCsv, remainingWorth, type AwayAccounts, type AwayReview, type Computers, type LedgerProvider, type Ledgers } from './consistency';
 import { alertMark, alertSentence, timeLeftSentence, windowAlert, type Alert, type AlertReason } from './alerts';
 import brandMark from './brand/cnd-monogram-hybrid-transparent.png';
 
@@ -30,6 +30,7 @@ interface Dashboard {
   grok: GrokSnapshot | null; grokError: string | null;
   claude: ClaudeSnapshot | null; claudeError: string | null; claudeUsageError: string | null; claudeEnabled: boolean;
   openrouter: OpenRouterSnapshot | null; openrouterError: string | null; openrouterConfigured: boolean;
+  antigravity: AntigravitySnapshot | null; antigravityError: string | null;
   claudePing: { enabled: boolean; message: string; lastAttempt: number | null; lastTokens: number | null };
   forecasts: Forecast[];
   consistency: Ledgers;
@@ -45,21 +46,32 @@ interface Forecast {
   windowId: string | null; alert: Alert | null; alertReason: AlertReason | null; runsOutAt: number | null; surgeRatio: number | null;
   paceRunsOutAt: number | null; paceLastsToReset: boolean;
 }
-type Provider = 'codex' | 'claude' | 'grok' | 'openrouter';
-type CompactWindow = 'codexFiveHour' | 'codexWeekly' | 'claudeFiveHour' | 'claudeWeekly' | 'grokAllowance';
+type Provider = 'codex' | 'claude' | 'grok' | 'openrouter' | 'antigravity';
+type CompactWindow = 'codexFiveHour' | 'codexWeekly' | 'claudeFiveHour' | 'claudeWeekly' | 'grokAllowance' | 'antigravityGeminiFiveHour' | 'antigravityGeminiWeekly' | 'antigravityThirdPartyFiveHour' | 'antigravityThirdPartyWeekly';
 interface Settings {
   providers: Record<Provider, boolean>;
   compactWindows: CompactWindow[] | null;
   localLogs: boolean;
 }
-const providerNames: Record<Provider, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok', openrouter: 'OpenRouter' };
+const providerNames: Record<Provider, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok', openrouter: 'OpenRouter', antigravity: 'Antigravity' };
 const compactChoices: { id: CompactWindow; provider: Provider; label: string }[] = [
   { id: 'claudeFiveHour', provider: 'claude', label: 'Claude · five-hour' },
   { id: 'claudeWeekly', provider: 'claude', label: 'Claude · weekly' },
   { id: 'codexFiveHour', provider: 'codex', label: 'Codex · five-hour' },
   { id: 'codexWeekly', provider: 'codex', label: 'Codex · weekly' },
+  { id: 'antigravityGeminiFiveHour', provider: 'antigravity', label: 'Antigravity · Gemini 5-hour' },
+  { id: 'antigravityGeminiWeekly', provider: 'antigravity', label: 'Antigravity · Gemini weekly' },
+  { id: 'antigravityThirdPartyFiveHour', provider: 'antigravity', label: 'Antigravity · Claude & GPT 5-hour' },
+  { id: 'antigravityThirdPartyWeekly', provider: 'antigravity', label: 'Antigravity · Claude & GPT weekly' },
   { id: 'grokAllowance', provider: 'grok', label: 'Grok · included allowance' },
 ];
+interface AntigravitySnapshot {
+  observedAt: number; plan: string | null; windows: Allowance[];
+  credits: { id: string; label: string; balance: string | null; unlimited: boolean }[];
+  source: string;
+  observedTokens: number | null; observedSince: number | null; lastTokenAt: number | null;
+  dailyUsage: { date: string; tokens: number }[];
+}
 interface OpenRouterSnapshot {
   observedAt: number; balanceUsd: number; totalCreditsUsd: number; totalUsageUsd: number;
   dailyUsage: { date: string; tokens: number }[]; usageError: string | null;
@@ -78,7 +90,7 @@ interface GrokSnapshot {
 }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
-let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, forecasts: [], consistency: {}, usageRelayError: null };
+let state: Dashboard = { settings: { providers: { codex: false, claude: false, grok: false, openrouter: false, antigravity: false }, compactWindows: null, localLogs: false }, needsSetup: false, snapshot: null, error: null, refreshing: false, lastAttempt: null, nextRefresh: null, observations: 0, grok: null, grokError: null, claude: null, claudeError: null, claudeUsageError: null, claudeEnabled: false, claudePing: { enabled: false, message: "Off. No automatic model requests.", lastAttempt: null, lastTokens: null }, openrouter: null, openrouterError: null, openrouterConfigured: false, antigravity: null, antigravityError: null, forecasts: [], consistency: {}, usageRelayError: null };
 let page: 'overview' | 'history' | 'consistency' | 'usage' | 'connections' = 'overview';
 const localDateTime = (epoch: number) => new Date(epoch - new Date(epoch).getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 const away: AwayReview = { start: '', end: '', busy: false, error: '', result: null };
@@ -110,7 +122,7 @@ let usageFilter: UsageFilter | null = null;
 let usageList: UsageList | null | undefined;
 let usageError: string | null = null;
 let usageRequest = 0;
-const ledgerProviders = () => (['codex', 'claude'] as const).filter(provider => state.settings.providers[provider]);
+const ledgerProviders = (): LedgerProvider[] => (['codex', 'claude', 'antigravity'] as const).filter(provider => state.settings.providers[provider]);
 function currentUsageFilter() {
   const providers = ledgerProviders();
   if (!usageFilter || !providers.includes(usageFilter.provider)) usageFilter = emptyFilter(providers[0] ?? 'claude', state.ledgerDays || 28);
@@ -130,7 +142,7 @@ function showUsage(change: Partial<UsageFilter>) {
   usageFilter = { ...currentUsageFilter(), page: 0, ...change };
   usageList = undefined; usageError = null; page = 'usage'; render(); void loadUsage();
 }
-let historyProvider: 'codex' | 'claude' | 'openrouter' = 'codex';
+let historyProvider: 'codex' | 'claude' | 'antigravity' | 'openrouter' = 'codex';
 let setupBusy = false;
 // Results of Settings actions are shown beside the control that produced them and belong to
 // the Settings page: leaving it clears them, so a confirmation never lingers on other pages.
@@ -167,7 +179,7 @@ function alertParts(provider: string, windowId: string | null, remaining: number
   const facts = stale ? null : windowAlert(provider, windowId, remaining, resetsAt, restricted, state.forecasts);
   const sentence = facts ? alertSentence(facts, dateTime) : '';
   const left = stale || restricted ? '' : timeLeftSentence(provider, windowId, state.forecasts, Date.now() / 1000);
-  const ledger = provider === 'Codex' || provider === 'Claude' ? provider.toLowerCase() as 'codex' | 'claude' : null;
+  const ledger = provider === 'Codex' || provider === 'Claude' || provider === 'Antigravity' ? provider.toLowerCase() as LedgerProvider : null;
   const worth = ledger && !restricted && !stale ? remainingWorth(state.consistency ?? {}, ledger, windowId, remaining) : '';
   return { alert: facts?.alert ?? null, mark: alertMark(facts?.alert ?? null), left: `${left ? `<p class="support time-left">${escape(left)}</p>` : ''}${worth ? `<p class="support">${escape(worth)}</p>` : ''}`, line: sentence ? `<p class="alert-line" role="status">${alertMark(facts!.alert)} ${escape(sentence)}</p>` : '' };
 }
@@ -193,6 +205,20 @@ function claudeCard() {
     ${state.claudeError ? `<p class="warning-text" role="status">${escape(state.claudeError)}</p>` : ''}
     ${state.claudeUsageError ? `<p class="warning-text" role="status">${escape(state.claudeUsageError)}</p>` : ''}
     <button class="text-button" data-page="connections">${state.claudeEnabled ? 'Manage feed' : 'Set up Claude'} →</button></article>`;
+}
+function antigravityCard() {
+  const snapshot = state.antigravity;
+  const stale = snapshot && (state.antigravityError != null || Date.now() / 1000 - snapshot.observedAt > 360);
+  const windows = snapshot?.windows ?? [];
+  const credits = snapshot?.credits ?? [];
+  return `<article class="provider muted-card"><div class="provider-heading"><h3>Antigravity</h3><span>${escape(snapshot?.plan ?? 'Google AI CLI')}</span></div>
+    ${windows.length ? `<div class="grok-metrics">${windows.map(window => { const alert = alertParts('Antigravity', window.id, window.remainingPercent, window.resetsAt, window.blocked === true, !!stale); return `<div><span class="resource-label">${escape(windowName(window))}</span><p class="unavailable">${metric(window.remainingPercent)}% left${alert.mark}</p><p class="support">Resets ${dateTime(window.resetsAt)}</p>${window.blocked ? '<p class="warning-text">Disabled or restricted</p>' : ''}${alert.left}${alert.line}</div>`; }).join('')}</div>` : '<p class="unavailable">Not connected</p>'}
+    ${credits.length ? `<div class="grok-metrics">${credits.map(credit => `<div><span class="resource-label">${escape(credit.label)}</span><p class="unavailable">${credit.unlimited ? 'Unlimited' : credit.balance == null ? 'Unavailable' : metric(Number(credit.balance))}</p></div>`).join('')}</div>` : ''}
+    ${snapshot ? `<p class="connection-state ${stale ? 'warning-text' : ''}">${stale ? 'Last known quota' : escape(snapshot.source || 'Antigravity CLI')} · ${age(snapshot.observedAt)}</p>` : '<p class="support">Reads your signed-in agy CLI quota without sending prompts. Run agy once to sign in, then refresh.</p>'}
+    ${snapshot?.observedTokens != null ? `<p class="support"><strong>${metric(snapshot.observedTokens, true)}</strong> local tokens observed since ${dateTime(snapshot.observedSince)}.</p>` : ''}
+    ${snapshot?.lastTokenAt != null ? `<p class="connection-state">Last token event · ${age(snapshot.lastTokenAt)}</p>` : ''}
+    <p class="support">${state.settings.localLogs ? 'Local transcripts across Antigravity CLI, App, and IDE supply per-request token history.' : 'Turn on Local session logs in Settings to include per-request token burn from Antigravity CLI, App, and IDE.'}</p>
+    ${state.antigravityError ? `<p class="warning-text" role="status">${escape(state.antigravityError)}</p>` : ''}</article>`;
 }
 function grokCard() {
   const snapshot = state.grok;
@@ -235,17 +261,17 @@ function overview() {
       <div class="provider-footer"><span class="${snapshot.ordinaryUsageAllowed === false ? 'warning-text' : ''}">${snapshot.ordinaryUsageAllowed === true ? 'Included usage is available' : snapshot.ordinaryUsageAllowed === false ? 'Included usage is currently restricted' : 'Usage permission not supplied'}</span><span>Observed ${age(snapshot.observedAt)}</span></div>
     ` : `<p class="empty">${state.refreshing ? 'Reading your Codex account…' : 'Refresh to read your existing Codex sign-in. No model requests are made.'}</p>`}
   </section>` : ''}
-  <div class="secondary-providers">${enabled.claude ? claudeCard() : ''}${enabled.grok ? grokCard() : ''}${enabled.openrouter ? openrouterCard() : ''}</div>
+  <div class="secondary-providers">${enabled.claude ? claudeCard() : ''}${enabled.antigravity ? antigravityCard() : ''}${enabled.grok ? grokCard() : ''}${enabled.openrouter ? openrouterCard() : ''}</div>
   <div class="detail-grid">${enabled.codex ? `<section class="panel"><div class="section-heading"><h2>Token activity</h2><button class="text-button" data-page="history">View daily history →</button></div>${snapshot ? `<div class="totals"><div><span class="resource-label">Account lifetime</span><strong title="${metric(snapshot.lifetimeTokens)}">${metric(snapshot.lifetimeTokens, true)}</strong></div><div><span class="resource-label">Peak reported day</span><strong title="${metric(snapshot.peakDailyTokens)}">${metric(snapshot.peakDailyTokens, true)}</strong></div></div>${historyBars(snapshot)}` : '<p class="empty">Token history will appear after a successful account read.</p>'}<p class="footnote">Codex account totals. Provider day labels are preserved; day timezone and reporting delay are not specified.</p>${snapshot?.usageError ? `<p class="warning-text">${escape(snapshot.usageError)}</p>` : ''}</section>` : ''}
   ${outlook()}</div>`;
 }
 function history() {
-  const sources = (['codex', 'claude', 'openrouter'] as const).filter(provider => state.settings.providers[provider]);
+  const sources = (['codex', 'claude', 'antigravity', 'openrouter'] as const).filter(provider => state.settings.providers[provider]);
   if (!sources.length) return '<section class="panel"><h2>Daily token history</h2><p class="empty">No enabled provider supplies token history. Saved history is kept when you turn an account off.</p><button class="text-button" data-page="connections">Choose providers in Settings →</button></section>';
   if (!sources.includes(historyProvider)) historyProvider = sources[0];
-  const snapshot = historyProvider === 'codex' ? state.snapshot : historyProvider === 'claude' ? state.claude : state.openrouter;
-  const description = historyProvider === 'codex' ? 'Provider-reported account day buckets, retained across refreshes. Provider day labels are preserved; the newest day can be incomplete or delayed.' : historyProvider === 'claude' ? 'Local Claude Code tokens collected while this dashboard was running, grouped by UTC day. Includes input, output, cache reads and cache creation. This is observed history, not account lifetime usage.' : 'Account token reports for completed UTC days. Today is unavailable. Imports update the previous 30 days and retain older days. Input plus output; cache and reasoning subsets are not counted again. Replacing the management key starts separate history.';
-  return `<section class="panel"><div class="section-heading"><h2>Daily token history</h2><select id="history-provider" aria-label="Token history source">${sources.map(value => `<option value="${value}" ${historyProvider === value ? 'selected' : ''}>${providerNames[value]}${value === 'claude' ? ' · local observed' : value === 'openrouter' ? ' · imported' : ' account'}</option>`).join('')}</select></div><p class="support">${description}</p>${snapshot?.dailyUsage.length ? `<table><caption class="sr-only">${historyProvider} daily token totals</caption><thead><tr><th scope="col">${historyProvider === 'codex' ? 'Provider day' : 'UTC day'}</th><th scope="col" class="numeric">Tokens</th></tr></thead><tbody>${[...snapshot.dailyUsage].reverse().map(day => `<tr><td>${escape(day.date)}</td><td class="numeric">${metric(day.tokens)}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">No daily history has been reported.</p>'}</section>`;
+  const snapshot = historyProvider === 'codex' ? state.snapshot : historyProvider === 'claude' ? state.claude : historyProvider === 'antigravity' ? state.antigravity : state.openrouter;
+  const description = historyProvider === 'codex' ? 'Provider-reported account day buckets, retained across refreshes. Provider day labels are preserved; the newest day can be incomplete or delayed.' : historyProvider === 'claude' ? 'Local Claude Code tokens collected while this dashboard was running, grouped by UTC day. Includes input, output, cache reads and cache creation. This is observed history, not account lifetime usage.' : historyProvider === 'antigravity' ? 'Local Antigravity tokens read from CLI, App, and IDE session transcripts on this device, grouped by UTC day. Includes fresh input, output, and cache reads. Enable Local session logs in Settings to collect them.' : 'Account token reports for completed UTC days. Today is unavailable. Imports update the previous 30 days and retain older days. Input plus output; cache and reasoning subsets are not counted again. Replacing the management key starts separate history.';
+  return `<section class="panel"><div class="section-heading"><h2>Daily token history</h2><select id="history-provider" aria-label="Token history source">${sources.map(value => `<option value="${value}" ${historyProvider === value ? 'selected' : ''}>${providerNames[value]}${value === 'claude' || value === 'antigravity' ? ' · local observed' : value === 'openrouter' ? ' · imported' : ' account'}</option>`).join('')}</select></div><p class="support">${description}</p>${snapshot?.dailyUsage.length ? `<table><caption class="sr-only">${historyProvider} daily token totals</caption><thead><tr><th scope="col">${historyProvider === 'codex' ? 'Provider day' : 'UTC day'}</th><th scope="col" class="numeric">Tokens</th></tr></thead><tbody>${[...snapshot.dailyUsage].reverse().map(day => `<tr><td>${escape(day.date)}</td><td class="numeric">${metric(day.tokens)}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">No daily history has been reported.</p>'}</section>`;
 }
 function connections() {
   settingsDraft ??= structuredClone(state.settings);
@@ -255,6 +281,7 @@ function connections() {
   const descriptions: Record<Provider, string> = {
     codex: 'Signed-in Codex CLI · plan and allowance windows detected automatically',
     claude: 'Signed-in native Claude Code CLI · account allowances and optional local tokens',
+    antigravity: 'Signed-in Antigravity CLI (agy) · Google AI quota pools and local transcript tokens',
     grok: 'Signed-in Grok CLI · included allowance and prepaid balance when supplied',
     openrouter: 'Management key · prepaid account credits and imported token history',
   };
@@ -264,7 +291,7 @@ function connections() {
     <fieldset ${setupBusy ? 'disabled' : ''}><legend>Tray icon and compact strip</legend><label class="setting-mode" for="compact-mode">Allowance windows <select id="compact-mode"><option value="auto" ${draft.compactWindows == null ? 'selected' : ''}>Choose automatically</option><option value="custom" ${draft.compactWindows != null ? 'selected' : ''}>Choose up to four</option></select></label>
     <p class="support">Automatic uses reported windows, prioritizing one per enabled provider, then weekly windows, up to four bars. All reported windows remain in the full dashboard. OpenRouter credits appear in the dashboard.</p>
     ${draft.compactWindows == null ? '' : `<div class="compact-options">${compactChoices.filter(choice => draft.providers[choice.provider]).map(choice => `<label class="setting-choice"><input id="window-${choice.id}" type="checkbox" data-window="${choice.id}" ${draft.compactWindows!.includes(choice.id) ? 'checked' : ''}><span>${choice.label}</span></label>`).join('') || '<p class="support">Select a provider with allowances above.</p>'}</div><p class="footnote">A selected window stays unavailable if your provider does not supply it. Limits are read from your account; no Plus/Pro setting is needed.</p>`}</fieldset>
-    <fieldset ${setupBusy ? 'disabled' : ''}><legend>Local session logs</legend><label class="setting-choice"><input id="local-logs" type="checkbox" ${draft.localLogs ? 'checked' : ''}><span><strong>Read Codex and Claude Code session logs on this computer</strong><small>Adds per-request token counts by model and type, including sessions run while m-dash was closed, so allowance use can be compared with tokens. Only accounting fields are kept; conversation content is never stored.</small></span></label></fieldset>
+    <fieldset ${setupBusy ? 'disabled' : ''}><legend>Local session logs</legend><label class="setting-choice"><input id="local-logs" type="checkbox" ${draft.localLogs ? 'checked' : ''}><span><strong>Read Codex, Claude Code, and Antigravity session logs on this computer</strong><small>Adds per-request token counts by model and type, including sessions run while m-dash was closed, so allowance use can be compared with tokens. Only accounting fields are kept; conversation content is never stored.</small></span></label></fieldset>
     <div class="settings-actions"><button id="save-settings" class="refresh" type="submit" ${setupBusy ? 'disabled' : ''}>${setupBusy ? 'Saving…' : state.needsSetup ? 'Save and continue' : 'Save settings'}</button><button id="discard-settings" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Revert changes</button><span class="support">Changes apply after saving.</span></div>${noticeLine('preferences')}</form></section>
     ${usageRelayPanel()}
     <section class="panel settings-panel"><h2>Mobile companion</h2><p>Opt-in encrypted sharing with Android. Credentials and pings stay here.</p><button id="mobile-sync" class="refresh">Set up mobile sync</button></section>
@@ -275,6 +302,7 @@ function connections() {
     ${enabled.codex ? `<div class="connection-row"><div><h3>Codex CLI</h3><p>Install Codex CLI and sign in with your subscription, then refresh. Plus, Pro and other plan names and limits come from the account response. No subscription credentials are copied into m-dash.</p>${state.error ? `<p class="warning-text">${escape(state.error)}</p>` : ''}</div><span class="badge ${state.error ? 'warning' : ''}">${state.error ? 'Needs attention' : state.snapshot ? `Detected: ${escape(state.snapshot.plan ?? 'account')}` : 'Awaiting read'}</span></div>` : ''}
     ${enabled.claude ? `<div class="connection-row"><div><h3>Claude</h3><p>Account allowances are read through your signed-in native Claude CLI every five minutes. This integration uses an experimental Claude contract; a CLI change may require an m-dash update.</p><p>${state.claudeEnabled ? 'Local token feed enabled. Restart Claude Code after setup or restarting m-dash, and keep m-dash running during ordinary work.' : 'Enable the optional local feed for observed token history. Existing custom statuslines or telemetry are preserved and may require manual composition.'}</p><p>Disabling the local feed restores the settings m-dash added and keeps history. Turning off the Claude provider also stops recording local events, but leaves the feed setup in place.</p>${state.claudeUsageError ? `<p class="warning-text">Account usage: ${escape(state.claudeUsageError)}</p>` : ''}${state.claudeError ? `<p class="warning-text">Local feed: ${escape(state.claudeError)}</p>` : ''}${noticeLine('claudeFeed')}</div><button id="claude-toggle" class="refresh" ${setupBusy ? 'disabled' : ''}>${state.claudeEnabled ? 'Disable local feed' : 'Enable local feed'}</button></div>` : ''}
     ${enabled.grok ? `<div class="connection-row"><div><h3>Grok CLI</h3><p>Install the Grok CLI and run grok login, then refresh. Your sign-in supplies plan and billing information; missing allowance percentages stay unavailable.</p>${state.grokError ? `<p class="warning-text">${escape(state.grokError)}</p>` : ''}</div><span class="badge ${state.grokError ? 'warning' : ''}">${state.grokError ? 'Needs attention' : state.grok ? 'Billing connected' : 'Awaiting read'}</span></div>` : ''}
+    ${enabled.antigravity ? `<div class="connection-row"><div><h3>Antigravity CLI (agy)</h3><p>Install Antigravity CLI (agy) and sign in with your Google account, then refresh. m-dash reads quota via agy’s statusLine payload every five minutes without sending prompts or modifying your agy settings.</p>${state.antigravityError ? `<p class="warning-text">${escape(state.antigravityError)}</p>` : ''}</div><span class="badge ${state.antigravityError ? 'warning' : ''}">${state.antigravityError ? 'Needs attention' : state.antigravity ? `Detected: ${escape(state.antigravity.plan ?? 'account')}` : 'Awaiting read'}</span></div>` : ''}
     ${enabled.openrouter ? `<div class="connection-row"><div><h3>OpenRouter</h3><p>${state.openrouterConfigured ? 'Management key saved in your system’s secure credential store.' : 'Account-wide reports require an OpenRouter management key.'} Enter the key in the native secure prompt. The key never enters this web interface. Management keys can administer API keys and budgets; m-dash calls only the read-only credit and activity endpoints.</p><p>Disconnect removes the saved key and keeps local history. Replacing the key starts separate history. <button id="openrouter-settings" class="text-button">OpenRouter management keys ↗</button></p>${state.openrouterError ? `<p class="warning-text">${escape(state.openrouterError)}</p>` : ''}${noticeLine('openrouter')}</div><div class="connection-actions"><button id="openrouter-connect" class="refresh" ${setupBusy ? 'disabled' : ''}>${state.openrouterConfigured ? 'Replace key' : 'Connect key'}</button>${state.openrouterConfigured ? `<button id="openrouter-disconnect" class="text-button" ${setupBusy ? 'disabled' : ''}>Disconnect</button>` : ''}</div></div>` : ''}</section>` : ''}`;
 }
 const hostOf = (url: string) => { try { return new URL(url).host; } catch { return url; } };
@@ -334,12 +362,12 @@ function render() {
   });
   root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; if (page === 'usage') { usageList = undefined; void loadUsage(); } render(); }));
   root.querySelectorAll<HTMLElement>('[data-usage-provider]').forEach(element => {
-    const open = () => showUsage({ provider: element.dataset.usageProvider as 'codex' | 'claude', ...(element.dataset.usageDay ? { date: element.dataset.usageDay, where: '', model: '', purpose: '' } : { date: '', where: element.dataset.usageWhere ?? '', model: element.dataset.usageModel ?? '', purpose: element.dataset.usagePurpose ?? '' }) });
+    const open = () => showUsage({ provider: element.dataset.usageProvider as LedgerProvider, ...(element.dataset.usageDay ? { date: element.dataset.usageDay, where: '', model: '', purpose: '' } : { date: '', where: element.dataset.usageWhere ?? '', model: element.dataset.usageModel ?? '', purpose: element.dataset.usagePurpose ?? '' }) });
     element.addEventListener('click', open);
     element.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
   });
   const usageInput = (id: string, change: (value: string) => Partial<UsageFilter>) => root.querySelector<HTMLInputElement | HTMLSelectElement>(id)?.addEventListener('change', event => showUsage(change((event.target as HTMLInputElement).value)));
-  usageInput('#usage-provider', value => ({ provider: value as 'codex' | 'claude', where: '', model: '', purpose: '' }));
+  usageInput('#usage-provider', value => ({ provider: value as LedgerProvider, where: '', model: '', purpose: '' }));
   usageInput('#usage-days', value => value ? { days: Number(value), date: '' } : {});
   usageInput('#usage-date', value => ({ date: value }));
   usageInput('#usage-where', value => ({ where: value }));

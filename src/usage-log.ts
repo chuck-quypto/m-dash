@@ -1,8 +1,8 @@
 // The usage log: every request m-dash recorded for one account, newest first, filtered and paged
 // in the native store, with the allowance steps of the same span shown between the rows.
-import { surfaceName, type Ledgers } from './consistency';
+import { surfaceName, type LedgerProvider, type Ledgers } from './consistency';
 
-export interface UsageFilter { provider: 'codex' | 'claude'; days: number; date: string; where: string; model: string; purpose: string; page: number }
+export interface UsageFilter { provider: LedgerProvider; days: number; date: string; where: string; model: string; purpose: string; page: number }
 export interface UsageRow { at: number; where: string; model: string; purpose: string; input: number; output: number; cacheRead: number; cacheWrite: number; costMicros: number | null }
 export interface UsageStep { window: string; at: number; used: number; previous: number }
 export interface UsageList { rows: UsageRow[]; steps: UsageStep[]; total: number; page: number; pageSize: number; choices: { where: string[]; model: string[]; purpose: string[] } }
@@ -13,19 +13,21 @@ const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const usd = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 4 });
 const time = (seconds: number) => new Date(seconds * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' });
 
-export const emptyFilter = (provider: 'codex' | 'claude', days = 28): UsageFilter => ({ provider, days, date: '', where: '', model: '', purpose: '', page: 0 });
+export const emptyFilter = (provider: LedgerProvider, days = 28): UsageFilter => ({ provider, days, date: '', where: '', model: '', purpose: '', page: 0 });
+
+const usageProviderNames: Record<LedgerProvider, string> = { codex: 'Codex', claude: 'Claude', antigravity: 'Antigravity' };
 
 function select(id: string, label: string, value: string, options: [string, string][]) {
   return `<label>${label} <select id="${id}">${options.map(([option, text]) => `<option value="${escape(option)}"${option === value ? ' selected' : ''}>${escape(text)}</option>`).join('')}</select></label>`;
 }
 
-export function usageLogPage(filter: UsageFilter, list: UsageList | null | undefined, error: string | null, providers: ('codex' | 'claude')[], ledgers: Ledgers) {
-  if (!providers.length) return '<section class="panel"><h2>Usage log</h2><p class="empty">Enable Codex or Claude in Settings.</p></section>';
+export function usageLogPage(filter: UsageFilter, list: UsageList | null | undefined, error: string | null, providers: LedgerProvider[], ledgers: Ledgers) {
+  if (!providers.length) return '<section class="panel"><h2>Usage log</h2><p class="empty">Enable Codex, Claude, or Antigravity in Settings.</p></section>';
   const labels = new Map((ledgers[filter.provider]?.windows ?? []).map(window => [window.id, window.label]));
   const choices = list?.choices ?? { where: [], model: [], purpose: [] };
   const keep = (values: string[], current: string) => current && !values.includes(current) ? [...values, current] : values;
   const filters = `<div class="usage-filters">
-    ${select('usage-provider', 'Account', filter.provider, providers.map(provider => [provider, provider === 'codex' ? 'Codex' : 'Claude']))}
+    ${select('usage-provider', 'Account', filter.provider, providers.map(provider => [provider, usageProviderNames[provider]]))}
     ${select('usage-days', 'Range', filter.date ? '' : String(filter.days), [...(filter.date ? [['', 'One day'] as [string, string]] : []), ['7', '7 days'], ['28', '28 days'], ['90', '90 days']])}
     <label>Day <input type="date" id="usage-date" value="${escape(filter.date)}"></label>
     ${select('usage-where', 'Where', filter.where, [['', 'Anywhere'], ...keep(choices.where, filter.where).map(value => [value, surfaceName(value)] as [string, string])])}

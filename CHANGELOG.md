@@ -7,7 +7,8 @@ Notable changes to the m-dash desktop app. The format follows
 ## [Unreleased]
 
 ### Added
-- **While you were away** reviews a chosen period for connected Codex and Claude accounts, showing observed allowance increases, estimated contributions from recorded sources, and unexplained movement.
+- **Antigravity** provider support: reads live quota windows (Gemini 5-hour/weekly and 3rd-party 5-hour/weekly) and optional AI credit balances via a session-only `agy --settings` statusLine capture without editing user configuration or sending prompts, and scans local Antigravity CLI, desktop app, and IDE `transcript.jsonl` logs for per-request token burn, Usage log, Allowance vs tokens, and compact strip display.
+- **While you were away** reviews a chosen period for connected Codex, Claude, and Antigravity accounts, showing observed allowance increases, estimated contributions from recorded sources, and unexplained movement.
 
 ## [0.6.0-rc.1] - 2026-11-08
 

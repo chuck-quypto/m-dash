@@ -1,6 +1,6 @@
 # Installing and using m-dash
 
-m-dash is a local Windows and Mac dashboard for AI allowances, resets, credits and usage. You can use any subset of Codex, Claude, Grok and OpenRouter. Account collection reads information without sending model prompts or purchasing credits. A separate Claude ping feature is off by default and makes a model request only after you enable it through its usage confirmation.
+m-dash is a local Windows and Mac dashboard for AI allowances, resets, credits and usage. You can use any subset of Codex, Claude, Antigravity, Grok and OpenRouter. Account collection reads information without sending model prompts or purchasing credits. A separate Claude ping feature is off by default and makes a model request only after you enable it through its usage confirmation.
 
 ## Windows installation
 

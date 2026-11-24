@@ -22,6 +22,8 @@ pub struct Dashboard {
     pub openrouter: Option<Value>,
     pub openrouter_error: Option<String>,
     pub openrouter_configured: bool,
+    pub antigravity: Option<Value>,
+    pub antigravity_error: Option<String>,
     pub forecasts: Vec<Value>,
     /// Burn ledgers keyed by provider, comparing allowance use with observed tokens.
     pub consistency: Value,
@@ -63,6 +65,16 @@ impl Dashboard {
                 self.grok_error = None;
             }
             Err(message) => self.grok_error = Some(message),
+        }
+    }
+
+    pub fn apply_antigravity_result(&mut self, result: Result<Value, String>) {
+        match result {
+            Ok(snapshot) => {
+                self.antigravity = Some(snapshot);
+                self.antigravity_error = None;
+            }
+            Err(message) => self.antigravity_error = Some(message),
         }
     }
 }

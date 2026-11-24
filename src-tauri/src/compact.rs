@@ -30,10 +30,15 @@ pub fn allowances(dashboard: &Dashboard, now: u64) -> Vec<Allowance> {
     let codex = dashboard.snapshot.as_ref().unwrap_or(&Value::Null);
     let claude = dashboard.claude.as_ref().unwrap_or(&Value::Null);
     let grok = dashboard.grok.as_ref().unwrap_or(&Value::Null);
+    let antigravity = dashboard.antigravity.as_ref().unwrap_or(&Value::Null);
     let codex_week = window(codex, &["codex/primary", "codex/secondary"], 10080);
     let codex_short = window(codex, &["codex/primary", "codex/secondary"], 300);
     let claude_week = window(claude, &["seven_day"], 10080);
     let claude_short = window(claude, &["five_hour"], 300);
+    let agy_gemini_short = window(antigravity, &["gemini-5h"], 300);
+    let agy_gemini_week = window(antigravity, &["gemini-weekly"], 10080);
+    let agy_3p_short = window(antigravity, &["3p-5h"], 300);
+    let agy_3p_week = window(antigravity, &["3p-weekly"], 10080);
     let weekly_grok = grok["periodType"] == "USAGE_PERIOD_TYPE_WEEKLY";
     let grok_reset = grok["periodEnd"].as_str().and_then(|text| {
         time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
@@ -44,9 +49,13 @@ pub fn allowances(dashboard: &Dashboard, now: u64) -> Vec<Allowance> {
     let automatic = [
         CompactWindow::CodexFiveHour,
         CompactWindow::ClaudeFiveHour,
+        CompactWindow::AntigravityGeminiFiveHour,
         CompactWindow::GrokAllowance,
         CompactWindow::CodexWeekly,
         CompactWindow::ClaudeWeekly,
+        CompactWindow::AntigravityGeminiWeekly,
+        CompactWindow::AntigravityThirdPartyFiveHour,
+        CompactWindow::AntigravityThirdPartyWeekly,
     ];
     let selected = dashboard
         .settings
@@ -112,6 +121,50 @@ pub fn allowances(dashboard: &Dashboard, now: u64) -> Vec<Allowance> {
                 dashboard.grok_error.is_some(),
                 false,
                 true,
+            ),
+            CompactWindow::AntigravityGeminiFiveHour => (
+                row(
+                    "Antigravity",
+                    "5h",
+                    agy_gemini_short,
+                    antigravity["observedAt"].as_u64(),
+                ),
+                dashboard.antigravity_error.is_some(),
+                agy_gemini_short["blocked"] == true,
+                !agy_gemini_short.is_null() || agy_gemini_week.is_null(),
+            ),
+            CompactWindow::AntigravityGeminiWeekly => (
+                row(
+                    "Antigravity",
+                    "wk",
+                    agy_gemini_week,
+                    antigravity["observedAt"].as_u64(),
+                ),
+                dashboard.antigravity_error.is_some(),
+                agy_gemini_week["blocked"] == true,
+                !agy_gemini_week.is_null(),
+            ),
+            CompactWindow::AntigravityThirdPartyFiveHour => (
+                row(
+                    "Antigravity 3P",
+                    "5h",
+                    agy_3p_short,
+                    antigravity["observedAt"].as_u64(),
+                ),
+                dashboard.antigravity_error.is_some(),
+                agy_3p_short["blocked"] == true,
+                !agy_3p_short.is_null(),
+            ),
+            CompactWindow::AntigravityThirdPartyWeekly => (
+                row(
+                    "Antigravity 3P",
+                    "wk",
+                    agy_3p_week,
+                    antigravity["observedAt"].as_u64(),
+                ),
+                dashboard.antigravity_error.is_some(),
+                agy_3p_week["blocked"] == true,
+                !agy_3p_week.is_null(),
             ),
         };
         if dashboard.settings.compact_windows.is_none() && !present {
@@ -200,8 +253,13 @@ fn assess(row: &mut Allowance, forecasts: &[Value]) {
     let Some(remaining) = row.remaining_percent.filter(|_| row.status == "fresh") else {
         return;
     };
+    let provider_name = if row.label.starts_with("Antigravity") {
+        "Antigravity"
+    } else {
+        row.label
+    };
     let forecast = forecasts.iter().find(|forecast| {
-        forecast["provider"] == row.label
+        forecast["provider"] == provider_name
             && forecast["unit"] == "percentage points"
             && forecast["windowId"].as_str() == row.window_id.as_deref()
     });
@@ -378,9 +436,53 @@ mod tests {
                 claude: true,
                 grok: true,
                 openrouter: true,
+                antigravity: false,
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn antigravity_windows_appear_in_automatic_and_custom_compact_strip() {
+        use crate::settings::{CompactWindow, Providers, Settings};
+        let snapshot = crate::antigravity::normalize(
+            json!({
+                "email": "fixture@example.com",
+                "plan_tier": "Google AI Ultra",
+                "quota": {
+                    "gemini-5h": { "remaining_fraction": 0.85, "reset_in_seconds": 3600 },
+                    "gemini-weekly": { "remaining_fraction": 0.92, "reset_in_seconds": 86400 },
+                    "3p-5h": { "remaining_fraction": 1.0, "reset_in_seconds": 3600 }
+                }
+            }),
+            1000,
+        )
+        .unwrap();
+        let dashboard = Dashboard {
+            antigravity: Some(snapshot),
+            settings: Settings {
+                providers: Providers {
+                    antigravity: true,
+                    ..Default::default()
+                },
+                local_logs: false,
+                compact_windows: Some(vec![
+                    CompactWindow::AntigravityGeminiFiveHour,
+                    CompactWindow::AntigravityThirdPartyFiveHour,
+                ]),
+            },
+            ..Default::default()
+        };
+        let rows = allowances(&dashboard, 1100);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0].label, rows[0].period, rows[0].remaining_percent),
+            ("Antigravity", "5h", Some(85.))
+        );
+        assert_eq!(
+            (rows[1].label, rows[1].period, rows[1].remaining_percent),
+            ("Antigravity 3P", "5h", Some(100.))
+        );
     }
 
     #[test]

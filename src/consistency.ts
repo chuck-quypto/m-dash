@@ -17,7 +17,8 @@ export interface Ledger {
   account: string; days: number; limitHits: number; windows: LedgerWindow[]; surfaces: LedgerSurface[];
   cacheReadShare: number | null; serverVsLocal: { date: string; server: number; local: number }[];
 }
-export type Ledgers = { codex?: Ledger; claude?: Ledger };
+export type LedgerProvider = 'codex' | 'claude' | 'antigravity';
+export type Ledgers = Partial<Record<LedgerProvider, Ledger>>;
 
 interface AwaySource { surface: string; purpose: string }
 interface AwayWindow {
@@ -38,7 +39,8 @@ const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 const usd = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' });
 const percent = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 0 });
-const surfaceNames: Record<string, string> = { cli: 'Terminal', desktop: 'Desktop app', cloud: 'Cloud session', codex: 'Codex CLI' };
+const surfaceNames: Record<string, string> = { cli: 'Terminal', desktop: 'Desktop app', cloud: 'Cloud session', codex: 'Codex CLI', 'agy-cli': 'Antigravity CLI', 'agy-desktop': 'Antigravity App', 'agy-ide': 'Antigravity IDE' };
+const ledgerProviderNames: Record<LedgerProvider, string> = { codex: 'Codex', claude: 'Claude', antigravity: 'Antigravity' };
 // Rows shared by your other computers arrive as "other:<surface>", or "other:<surface>@<name>" once that computer has announced its name.
 export function surfaceName(surface: string) {
   if (!surface.startsWith('other:')) return surfaceNames[surface] ?? surface;
@@ -65,11 +67,11 @@ function awayWindow(window: AwayWindow) {
     `}</section>`;
 }
 
-export function awayUsagePanel(review: AwayReview, ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }) {
-  if (!enabled.codex && !enabled.claude) return '';
+export function awayUsagePanel(review: AwayReview, ledgers: Ledgers, enabled: { codex: boolean; claude: boolean; antigravity: boolean }) {
+  if (!enabled.codex && !enabled.claude && !enabled.antigravity) return '';
   const result = review.result;
   return `<section class="panel"><h2>While you were away</h2>
-    <p class="support">Review a period for your connected Codex and Claude accounts. Times use this device’s time zone.</p>
+    <p class="support">Review a period for your connected Codex, Claude, and Antigravity accounts. Times use this device’s time zone.</p>
     <form id="away-review" class="usage-filters">
       <label>From <input required type="datetime-local" id="away-start" value="${escape(review.start)}"></label>
       <label>Through <input required type="datetime-local" id="away-end" value="${escape(review.end)}"></label>
@@ -78,9 +80,9 @@ export function awayUsagePanel(review: AwayReview, ledgers: Ledgers, enabled: { 
     <div aria-live="polite">
     ${review.error ? `<p class="warning-text">${escape(review.error)}</p>` : ''}
     ${result ? `<p class="support">${escape(reviewTime(result.start))} – ${escape(reviewTime(result.end))}. Allowance totals use comparable readings inside this period. Gaps and resets can hide movement. Unexplained points can reflect missing usage, delayed readings, rounding, or limits of the estimate.</p>
-      ${(['codex', 'claude'] as const).filter(provider => enabled[provider]).map(provider => {
+      ${(['codex', 'claude', 'antigravity'] as const).filter(provider => enabled[provider]).map(provider => {
         const account = result.accounts[provider];
-        return `<section class="ledger-window"><h3>${provider === 'codex' ? 'Codex' : 'Claude'}</h3>
+        return `<section class="ledger-window"><h3>${ledgerProviderNames[provider]}</h3>
           ${!account || account.account !== ledgers[provider]?.account ? '<p class="empty">No report for the current account. Sign in, refresh accounts, then review again.</p>' : `
             ${account.windows.length ? account.windows.map(awayWindow).join('') : '<p class="empty">No allowance readings are available for this account.</p>'}
             <h4>Usage recorded during the period</h4>
@@ -93,7 +95,7 @@ export function awayUsagePanel(review: AwayReview, ledgers: Ledgers, enabled: { 
 const markDate = (mark: LedgerMark) => new Date(mark.at * 1000).toISOString().slice(0, 10);
 const dayNumber = (date: string) => Date.parse(`${date}T00:00:00Z`) / 86_400_000;
 
-function dayBars(provider: 'codex' | 'claude', window: LedgerWindow, marks: LedgerMark[]) {
+function dayBars(provider: LedgerProvider, window: LedgerWindow, marks: LedgerMark[]) {
   const days = window.days;
   const marked = new Map<string, string[]>();
   for (const mark of marks) marked.set(markDate(mark), [...(marked.get(markDate(mark)) ?? []), mark.text]);
@@ -121,7 +123,7 @@ export function confidence(window: LedgerWindow) {
 }
 
 // What the allowance left means in tokens and, for Claude, API-priced usage, at the learned rate.
-export function remainingWorth(ledgers: Ledgers, provider: 'codex' | 'claude', windowId: string | null, remaining: number | null) {
+export function remainingWorth(ledgers: Ledgers, provider: LedgerProvider, windowId: string | null, remaining: number | null) {
   const window = ledgers[provider]?.windows.find(item => item.id === windowId);
   if (!window?.enough || !window.pointsPerMillion || remaining == null || remaining <= 0) return '';
   const tokens = remaining / window.pointsPerMillion * 1e6;
@@ -129,7 +131,7 @@ export function remainingWorth(ledgers: Ledgers, provider: 'codex' | 'claude', w
   return `≈ ${compact.format(tokens)} weighted tokens${price} left at your learned rate.`;
 }
 
-function windowCard(provider: 'codex' | 'claude', window: LedgerWindow, marks: LedgerMark[]) {
+function windowCard(provider: LedgerProvider, window: LedgerWindow, marks: LedgerMark[]) {
   const share = window.points > 0 ? window.unattributed / window.points : 0;
   const rate = window.pointsPerMillion == null ? '' : `${provider === 'claude' && window.pointsPerDollar != null
     ? `One point ≈ ${usd.format(1 / window.pointsPerDollar)} of API-priced usage (${compact.format(1e6 / window.pointsPerMillion)} weighted tokens).`
@@ -154,7 +156,7 @@ function apiPrice(row: LedgerSurface) {
   return usd.format(row.costUsd);
 }
 
-function surfaces(provider: 'codex' | 'claude', ledger: Ledger) {
+function surfaces(provider: LedgerProvider, ledger: Ledger) {
   const sorted = [...ledger.surfaces].sort((a, b) => (b.input + b.output + b.cacheRead + b.cacheWrite) - (a.input + a.output + a.cacheRead + a.cacheWrite));
   // The 12 largest groups, plus every group from a cloud session or another computer, which can be small beside local use but is the point of the relay.
   const rows = [...sorted.slice(0, 12), ...sorted.slice(12).filter(row => shared(row.surface))];
@@ -176,7 +178,7 @@ function serverVsLocal(ledger: Ledger) {
 
 // Plan changes m-dash saw, plus the owner's own notes. A plan change, seen or added, gives the
 // days after it their own baseline rate.
-function notes(provider: 'codex' | 'claude', ledger: Ledger) {
+function notes(provider: LedgerProvider, ledger: Ledger) {
   const marks = ledger.marks ?? [];
   const today = new Date().toISOString().slice(0, 10);
   const rows = marks.length ? `<ul class="ledger-marks">${[...marks].reverse().map(mark => `<li><span class="ledger-mark-date">${escape(markDate(mark))}</span> ${escape(mark.text)}${mark.kind === 'plan' ? ' <span class="support">· plan change</span>' : ''}${mark.source === 'manual' ? ` <button class="text-button" data-ledger-remove="${provider}" data-at="${mark.at}" data-kind="${mark.kind}">Remove</button>` : ''}</li>`).join('')}</ul>` : '<p class="empty">No plan changes or notes in this range.</p>';
@@ -233,17 +235,17 @@ function computersPanel(computers: Computers, channel: boolean, localLogs: boole
     <p class="support">m-dash can't see chat and mobile apps, Claude Cowork and Duet, ChatGPT Dots, Codex cloud tasks or code review. Their use counts toward the same allowances and shows as unattributed.</p></section>`;
 }
 
-export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28, computers: Computers = {}, channel = false) {
-  const providers = (['codex', 'claude'] as const).filter(provider => enabled[provider]);
-  const intro = `<p class="support">Compares how far each allowance moved over the last ${days} days with the tokens m-dash observed on ${observedFrom(ledgers)}. Token types are weighted by the provider's published prices, Claude models by their API price (an Opus token counts more than a Haiku token), and the baseline rate comes from your most efficient days, learned separately before and after each plan change. The <strong>unattributed</strong> remainder can come from unobserved activity, such as chat, personal agents, or cloud tasks, as well as delayed readings, rounding, and limits of the estimate. A plan or provider change shows as a rate shift.</p>
-    ${localLogs ? '' : '<p class="warning-text">Turn on <strong>Local session logs</strong> in Settings for Codex token detail and Claude sessions run while m-dash was closed.</p>'}
+export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; claude: boolean; antigravity: boolean }, localLogs: boolean, claudeFeed: boolean, days = 28, computers: Computers = {}, channel = false) {
+  const providers = (['codex', 'claude', 'antigravity'] as const).filter(provider => enabled[provider]);
+  const intro = `<p class="support">Compares how far each allowance moved over the last ${days} days with the tokens m-dash observed on ${observedFrom(ledgers)}. Token types are weighted by the provider's published prices, Claude and Gemini models by their API price, and the baseline rate comes from your most efficient days, learned separately before and after each plan change. The <strong>unattributed</strong> remainder can come from unobserved activity, such as chat, personal agents, or cloud tasks, as well as delayed readings, rounding, and limits of the estimate. A plan or provider change shows as a rate shift.</p>
+    ${localLogs ? '' : '<p class="warning-text">Turn on <strong>Local session logs</strong> in Settings for Codex, Antigravity, and offline Claude token detail.</p>'}
     ${enabled.claude && !claudeFeed ? '<p class="warning-text">Enable the Claude local feed in Settings for cost, cloud-session and subagent detail.</p>' : ''}`;
-  if (!providers.length) return `<section class="panel"><h2>Allowance vs tokens</h2>${intro}<p class="empty">Enable Codex or Claude in Settings.</p></section>`;
+  if (!providers.length) return `<section class="panel"><h2>Allowance vs tokens</h2>${intro}<p class="empty">Enable Codex, Claude, or Antigravity in Settings.</p></section>`;
   return `<section class="panel"><div class="section-heading"><h2>Allowance vs tokens</h2><div class="ledger-actions">${rangePicker(days)}<button id="copy-ledger" class="text-button">Copy daily CSV</button></div></div>${intro}</section>
     ${computersPanel(computers, channel, localLogs, claudeFeed, enabled.claude)}
     ${providers.map(provider => {
       const ledger = ledgers[provider];
-      const name = provider === 'codex' ? 'Codex' : 'Claude';
+      const name = ledgerProviderNames[provider];
       if (!ledger) return `<section class="panel"><h2>${name}</h2><p class="empty">The ledger appears after the next successful account read.</p></section>`;
       return `<section class="panel ledger"><h2>${name}</h2>
         ${ledger.windows.length ? ledger.windows.map(window => windowCard(provider, window, ledger.marks ?? [])).join('') : '<p class="empty">No allowance readings yet.</p>'}

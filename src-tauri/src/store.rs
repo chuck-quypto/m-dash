@@ -185,6 +185,50 @@ impl Store {
         snapshot["dailyUsage"] = json!(days);
         Ok(())
     }
+
+    /// Populates `dailyUsage`, `observedTokens`, `observedSince` and `lastTokenAt` from
+    /// `usage_events` and rolled-up `usage_daily` rows for an account (e.g. Antigravity).
+    pub fn attach_usage_history(&self, snapshot: &mut Value) -> Result<(), String> {
+        let account = snapshot["accountId"]
+            .as_str()
+            .ok_or("Missing usage history account.")?;
+        let error = |_| "Cannot read local usage history.".to_string();
+        let retained = "SELECT day, SUM(input + output + cache_read + cache_write) AS tokens FROM usage_daily WHERE account=?1 AND day NOT IN (SELECT date(occurred_at,'unixepoch') FROM usage_events WHERE account=?1) GROUP BY day";
+        let (since, last): (Option<i64>, Option<i64>) = self
+            .0
+            .query_row(
+                &format!(
+                    "SELECT (SELECT MIN(start) FROM (SELECT MIN(occurred_at) AS start FROM usage_events WHERE account=?1 UNION ALL SELECT CAST(strftime('%s',day) AS INTEGER) FROM ({retained}))), (SELECT MAX(occurred_at) FROM usage_events WHERE account=?1)"
+                ),
+                [account],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(error)?;
+        let mut query = self
+            .0
+            .prepare(&format!(
+                "SELECT date(occurred_at,'unixepoch'), SUM(input + output + cache_read + cache_write) FROM usage_events WHERE account=?1 GROUP BY 1 UNION ALL {retained} ORDER BY 1"
+            ))
+            .map_err(error)?;
+        let days: Vec<Value> = query
+            .query_map([account], |row| {
+                Ok(json!({"date":row.get::<_,String>(0)?,"tokens":row.get::<_,i64>(1)?}))
+            })
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?;
+        let total = (!days.is_empty())
+            .then(|| {
+                days.iter()
+                    .try_fold(0_i64, |sum, day| sum.checked_add(day["tokens"].as_i64()?))
+            })
+            .flatten();
+        snapshot["dailyUsage"] = json!(days);
+        snapshot["observedTokens"] = json!(total);
+        snapshot["observedSince"] = json!(since);
+        snapshot["lastTokenAt"] = json!(last);
+        Ok(())
+    }
     pub fn ingest_claude_statusline(
         &mut self,
         value: Value,

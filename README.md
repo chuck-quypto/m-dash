@@ -3,9 +3,9 @@
 </p>
 
 A local desktop dashboard for your AI accounts. See allowances, reset times,
-credits, and usage history for any combination of **Codex, Claude, Grok, and
-OpenRouter**. Minimize it to a compact strip, or check the allowance bars in your
-Windows tray or Mac menu bar.
+credits, and usage history for any combination of **Codex, Claude, Antigravity,
+Grok, and OpenRouter**. Minimize it to a compact strip, or check the allowance
+bars in your Windows tray or Mac menu bar.
 
 m-dash runs entirely on your computer. There is no m-dash account, hosted
 dashboard, or analytics.
@@ -25,6 +25,7 @@ dashboard, or analytics.
 | --- | --- | --- |
 | Codex | Reported allowances, resets, credits and token history | Signed-in Codex CLI |
 | Claude | Account allowances and optional local token history | Signed-in native Claude Code CLI; usage contract is experimental |
+| Antigravity | Reported Gemini and 3rd-party quota pools, resets, and optional local transcript token history | Signed-in Antigravity CLI (`agy`) via session-only `statusLine` capture (no prompts) |
 | Grok | Reported allowance, prepaid balance and usage-period end | Signed-in Grok CLI; token history is unavailable |
 | OpenRouter | Credit balance and completed-day token imports | Your management key; current UTC-day totals are unavailable |
 

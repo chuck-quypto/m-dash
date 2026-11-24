@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod burn;
 pub mod claude;
 pub mod claude_feed;
@@ -45,6 +46,7 @@ struct Inner {
     grok_schedule: Schedule,
     claude_schedule: Schedule,
     openrouter_schedule: Schedule,
+    antigravity_schedule: Schedule,
     openrouter_setup: bool,
     openrouter_generation: u64,
     openrouter_retry_after: u64,
@@ -85,6 +87,10 @@ impl Inner {
                 self.openrouter_schedule
                     .next
                     .max(self.openrouter_retry_after),
+            ),
+            (
+                self.dashboard.settings.providers.antigravity,
+                self.antigravity_schedule.next,
             ),
         ]
         .into_iter()
@@ -262,6 +268,12 @@ fn update_forecasts(inner: &mut Inner) {
             "OpenRouter",
             &inner.dashboard.openrouter,
             !inner.dashboard.openrouter_configured || inner.dashboard.openrouter_error.is_some(),
+        ),
+        (
+            Provider::Antigravity,
+            "Antigravity",
+            &inner.dashboard.antigravity,
+            inner.dashboard.antigravity_error.is_some(),
         ),
     ] {
         if !inner.dashboard.settings.providers.enabled(provider) {
@@ -472,11 +484,12 @@ fn set_ledger_days(app: tauri::AppHandle, days: u64) -> Result<Dashboard, String
     Ok(inner.dashboard.clone())
 }
 
-/// The signed-in account a ledger belongs to: "codex" or "claude".
+/// The signed-in account a ledger belongs to: "codex", "claude", or "antigravity".
 fn ledger_account(inner: &Inner, provider: &str) -> Result<String, String> {
     let snapshot = match provider {
         "codex" => &inner.dashboard.snapshot,
         "claude" => &inner.dashboard.claude,
+        "antigravity" => &inner.dashboard.antigravity,
         _ => return Err("Unknown ledger.".into()),
     };
     snapshot
@@ -573,6 +586,7 @@ fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<Dashboard,
         inner.settings_generation += 1;
         inner.codex_schedule = Schedule::default();
         inner.grok_schedule = Schedule::default();
+        inner.antigravity_schedule = Schedule::default();
         // Keep Claude's five-minute minimum and OpenRouter's server retry delay.
     }
     inner.dashboard.settings = settings;
@@ -747,6 +761,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         read_grok,
         read_claude,
         read_openrouter,
+        read_antigravity,
         openrouter_generation,
         settings_generation,
     ) = {
@@ -771,7 +786,9 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             && !inner.openrouter_setup
             && inner.openrouter_retry_after <= now
             && inner.openrouter_schedule.due(now, force);
-        if !read_codex && !read_grok && !read_claude && !read_openrouter {
+        let read_antigravity = inner.dashboard.settings.providers.antigravity
+            && inner.antigravity_schedule.due(now, force);
+        if !read_codex && !read_grok && !read_claude && !read_openrouter && !read_antigravity {
             return Ok(inner.dashboard.clone());
         }
         inner.dashboard.refreshing = true;
@@ -780,12 +797,16 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         if read_claude {
             inner.claude_schedule.next = now.saturating_add(300);
         }
+        if read_antigravity {
+            inner.antigravity_schedule.next = now.saturating_add(300);
+        }
         publish_dashboard(&app, &inner.dashboard);
         (
             read_codex,
             read_grok,
             read_claude,
             read_openrouter,
+            read_antigravity,
             inner.openrouter_generation,
             inner.settings_generation,
         )
@@ -794,6 +815,8 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
     let claude_task = read_claude.then(|| tauri::async_runtime::spawn(claude::collect()));
     let openrouter_task =
         read_openrouter.then(|| tauri::async_runtime::spawn(openrouter::collect()));
+    let antigravity_task =
+        read_antigravity.then(|| tauri::async_runtime::spawn(antigravity::collect()));
     let visible = app.get_webview_window("main").is_some_and(|window| {
         window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true)
     });
@@ -933,7 +956,44 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             }
         }
     }
+    if let Some(task) = antigravity_task {
+        let mut result = task.await.unwrap_or_else(|_| {
+            Err("The Antigravity collector stopped unexpectedly. Refresh to retry.".into())
+        });
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "The collector state is unavailable.")?;
+        if inner.settings_generation == settings_generation {
+            let storage_error = result.as_mut().ok().and_then(|snapshot| {
+                inner
+                    .store
+                    .save(snapshot)
+                    .and_then(|()| inner.store.attach_usage_history(snapshot))
+                    .err()
+            });
+            inner
+                .antigravity_schedule
+                .finish(collector::now(), result.is_err(), false);
+            inner.antigravity_schedule.next =
+                inner.antigravity_schedule.next.max(collector::now() + 300);
+            inner.dashboard.apply_antigravity_result(result);
+            if let Some(message) = storage_error {
+                inner.dashboard.antigravity_error = Some(format!(
+                    "{message} Current values are shown but may not survive restart."
+                ));
+            }
+            publish_dashboard(&app, &inner.dashboard);
+        }
+    }
     read_local_logs(&app, settings_generation).await;
+    if let Ok(mut inner) = state.0.lock() {
+        if let Some(mut snapshot) = inner.dashboard.antigravity.clone() {
+            if inner.store.attach_usage_history(&mut snapshot).is_ok() {
+                inner.dashboard.antigravity = Some(snapshot);
+            }
+        }
+    }
     let me = {
         let inner = state
             .0
@@ -1015,6 +1075,12 @@ fn ledger_snapshots(
             providers.claude,
             &dashboard.claude,
             burn::Provider::Claude,
+        ),
+        (
+            "antigravity",
+            providers.antigravity,
+            &dashboard.antigravity,
+            burn::Provider::Antigravity,
         ),
     ]
     .into_iter()
@@ -1141,6 +1207,9 @@ async fn read_local_logs(app: &tauri::AppHandle, settings_generation: u64) {
     for (kind, provider) in [
         (Kind::Codex, "codex_rollout"),
         (Kind::Claude, "claude_transcript"),
+        (Kind::AntigravityCli, "antigravity_cli_transcript"),
+        (Kind::AntigravityDesktop, "antigravity_desktop_transcript"),
+        (Kind::AntigravityIde, "antigravity_ide_transcript"),
     ] {
         let state = app.state::<AppState>();
         let Some(root) = local_logs::root(kind) else {
@@ -1152,6 +1221,9 @@ async fn read_local_logs(app: &tauri::AppHandle, settings_generation: u64) {
             let (enabled, snapshot) = match kind {
                 Kind::Codex => (settings.providers.codex, &inner.dashboard.snapshot),
                 Kind::Claude => (settings.providers.claude, &inner.dashboard.claude),
+                Kind::AntigravityCli | Kind::AntigravityDesktop | Kind::AntigravityIde => {
+                    (settings.providers.antigravity, &inner.dashboard.antigravity)
+                }
             };
             if !settings.local_logs || !enabled || inner.settings_generation != settings_generation
             {
@@ -1213,11 +1285,15 @@ pub fn run() {
             let openrouter_configured = credential.as_ref().is_ok_and(|key|key.is_some());
             let openrouter_error = credential.err();
             let grok = store.latest("grok").map_err(std::io::Error::other)?;
+            let mut antigravity = store.latest("antigravity").map_err(std::io::Error::other)?;
+            if let Some(snapshot) = &mut antigravity {
+                let _ = store.attach_usage_history(snapshot);
+            }
             let mut claude = store.claude_snapshot().map_err(std::io::Error::other)?;
             let receiver = claude_setup::settings_path().and_then(|path| claude_setup::prepare_receiver(&directory, &path, claude_setup::PORT));
             let claude_enabled = receiver.is_ok() && claude_setup::settings_path().and_then(|path| claude_setup::enabled(&directory,&path)).unwrap_or(false);
             let previous_settings = store.settings().map_err(std::io::Error::other)?;
-            let existing = Providers { codex: snapshot.is_some(), claude: claude.is_some() || claude_enabled, grok: grok.is_some(), openrouter: openrouter.is_some() || openrouter_configured };
+            let existing = Providers { codex: snapshot.is_some(), claude: claude.is_some() || claude_enabled, grok: grok.is_some(), openrouter: openrouter.is_some() || openrouter_configured, antigravity: antigravity.is_some() };
             let needs_setup = previous_settings.is_none() && !existing.any();
             let settings = previous_settings.unwrap_or_else(|| if existing.any() { Settings::migrated(existing) } else { Settings::default() });
             if !needs_setup { store.save_settings(&settings).map_err(std::io::Error::other)?; }
@@ -1250,6 +1326,7 @@ pub fn run() {
                     grok,
                     claude,
                     openrouter,
+                    antigravity,
                     openrouter_configured,
                     openrouter_error,
                     claude_enabled,
@@ -1264,6 +1341,7 @@ pub fn run() {
                 grok_schedule: Schedule::default(),
                 claude_schedule: Schedule::default(),
                 openrouter_schedule: Schedule::default(),
+                antigravity_schedule: Schedule::default(),
                 openrouter_setup:false,
                 openrouter_generation:0,
                 openrouter_retry_after:0,
