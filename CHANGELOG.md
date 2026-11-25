@@ -6,6 +6,11 @@ Notable changes to the m-dash desktop app. The format follows
 
 ## [Unreleased]
 
+## [0.6.0-rc.2] - 2026-11-24
+
+Second release candidate for 0.6.0: adds Antigravity quota and local transcript
+tracking alongside the "While you were away" period review.
+
 ### Added
 - **Antigravity** provider support: reads live quota windows (Gemini 5-hour/weekly and 3rd-party 5-hour/weekly) and optional AI credit balances via a session-only `agy --settings` statusLine capture without editing user configuration or sending prompts, and scans local Antigravity CLI, desktop app, and IDE `transcript.jsonl` logs for per-request token burn, Usage log, Allowance vs tokens, and compact strip display.
 - **While you were away** reviews a chosen period for connected Codex, Claude, and Antigravity accounts, showing observed allowance increases, estimated contributions from recorded sources, and unexplained movement.
@@ -197,7 +202,8 @@ First public release. Targets Windows x64 and Apple Silicon macOS.
 - Android, encrypted mobile sync and the relay are experimental and are not part
   of this release.
 
-[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.6.0-rc.1...HEAD
+[Unreleased]: https://github.com/chuck-quypto/m-dash/compare/v0.6.0-rc.2...HEAD
+[0.6.0-rc.2]: https://github.com/chuck-quypto/m-dash/compare/v0.6.0-rc.1...v0.6.0-rc.2
 [0.6.0-rc.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.2...v0.6.0-rc.1
 [0.5.4-rc.2]: https://github.com/chuck-quypto/m-dash/compare/v0.5.4-rc.1...v0.5.4-rc.2
 [0.5.4-rc.1]: https://github.com/chuck-quypto/m-dash/compare/v0.5.2...v0.5.4-rc.1
