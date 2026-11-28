@@ -113,6 +113,25 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn claude_quota_uses_the_failure_state_of_its_own_source() {
+        let mut dashboard = Dashboard {
+            claude: Some(json!({"source":"Claude Code account usage"})),
+            claude_error: Some("Local feed failed".into()),
+            ..Default::default()
+        };
+        assert!(!dashboard.claude_failed());
+        dashboard.claude_enabled = true;
+        dashboard.claude_error = None;
+        dashboard.claude_usage_error = Some("Account refresh failed".into());
+        assert!(dashboard.claude_failed());
+
+        dashboard.claude = Some(json!({"source":"Claude Code statusline"}));
+        assert!(!dashboard.claude_failed());
+        dashboard.claude_enabled = false;
+        assert!(dashboard.claude_failed());
+    }
+
+    #[test]
     fn refresh_failure_preserves_the_last_observation_and_surfaces_the_failure() {
         let old = json!({"observedAt":100,"accountId":"one"});
         let mut dashboard = Dashboard {

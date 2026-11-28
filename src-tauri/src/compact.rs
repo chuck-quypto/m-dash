@@ -687,6 +687,44 @@ mod tests {
     }
 
     #[test]
+    fn only_the_window_that_resets_loses_its_alert() {
+        let mut dashboard = Dashboard {
+            snapshot: Some(json!({"observedAt":1000,"windows":[
+                {"id":"codex/primary","durationMins":300,"remainingPercent":2,"resetsAt":1100},
+                {"id":"codex/secondary","durationMins":10080,"remainingPercent":12,"resetsAt":8000}
+            ]})),
+            forecasts: vec![
+                json!({"provider":"Codex","unit":"percentage points","windowId":"codex/primary",
+                "alert":"critical","alertReason":"pace","runsOutAt":1099}),
+            ],
+            ..legacy_dashboard()
+        };
+        dashboard.settings.compact_windows = Some(vec![
+            CompactWindow::CodexFiveHour,
+            CompactWindow::CodexWeekly,
+        ]);
+        let before = allowances(&dashboard, 1099);
+        assert_eq!(
+            (before[0].alert, before[0].runs_out_at),
+            (Some("critical"), Some(1099))
+        );
+        let after = allowances(&dashboard, 1100);
+        assert_eq!(
+            (after[0].status, after[0].remaining_percent),
+            ("resetPending", Some(2.))
+        );
+        assert_eq!(
+            (after[0].alert, after[0].alert_reason, after[0].runs_out_at),
+            (None, None, None)
+        );
+        assert_eq!(
+            (after[1].status, after[1].alert),
+            ("fresh", Some("warning"))
+        );
+        assert_eq!(after[1], before[1]);
+    }
+
+    #[test]
     fn restricted_pools_and_groks_actual_period_are_labeled_correctly() {
         let mut dashboard = Dashboard {
             snapshot: Some(

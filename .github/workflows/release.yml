@@ -160,13 +160,13 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        run: npm run tauri -- build --config src-tauri/tauri.macos.conf.json --target aarch64-apple-darwin --bundles app,dmg --ci -- --locked
+        run: node scripts/mac-rc.mjs build
       - name: Notarize and staple the DMG itself
         env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
-          dmg="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/m-dash_$(node -p "require('./package.json').version")_aarch64.dmg"
+          dmg="${CARGO_TARGET_DIR:-src-tauri/target}/aarch64-apple-darwin/release/bundle/dmg/m-dash_$(node -p "require('./package.json').version")_aarch64.dmg"
           xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --timeout 30m
           # stapler fetches the ticket from Apple's CloudKit, which sometimes drops the connection.
           for attempt in 1 2 3 4; do

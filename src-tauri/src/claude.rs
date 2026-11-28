@@ -28,6 +28,10 @@ pub async fn read_usage_response<R: AsyncBufRead + Unpin>(reader: &mut R) -> Res
 }
 
 pub fn read_usage_cache() -> Result<Value, String> {
+    read_signed_in_cache(None)
+}
+
+fn read_signed_in_cache(status: Option<&Value>) -> Result<Value, String> {
     let path = if let Some(directory) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         std::path::PathBuf::from(directory).join(".claude.json")
     } else {
@@ -39,16 +43,26 @@ pub fn read_usage_cache() -> Result<Value, String> {
     let file = std::fs::File::open(path).map_err(|_| {
         "Claude has no saved account usage. Sign in with claude login, then refresh."
     })?;
-    read_usage_config(std::io::BufReader::new(file), crate::collector::now())
+    read_usage_config(
+        std::io::BufReader::new(file),
+        crate::collector::now(),
+        status,
+    )
 }
 
-fn read_usage_config(reader: impl std::io::Read, now: u64) -> Result<Value, String> {
-    // Deserialize only accounting metadata; subscription credential files are never opened.
+fn read_usage_config(
+    reader: impl std::io::Read,
+    now: u64,
+    status: Option<&Value>,
+) -> Result<Value, String> {
+    // Read only identity and accounting fields from Claude's metadata file.
     #[derive(serde::Deserialize, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Identity {
         account_uuid: String,
         organization_uuid: String,
+        #[serde(default, skip_serializing)]
+        email_address: Value,
     }
     #[derive(serde::Deserialize, serde::Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -60,6 +74,25 @@ fn read_usage_config(reader: impl std::io::Read, now: u64) -> Result<Value, Stri
         serde_json::from_reader(reader.take(32 * 1024 * 1024)).map_err(|_| {
             "Claude's saved account usage is invalid, being updated, or exceeds 32 MiB."
         })?;
+    if let Some(status) = status {
+        let identity = &accounting.oauth_account;
+        // Auth status identifies the login by email and organization. The cache supplies its UUID.
+        let email = identity
+            .email_address
+            .as_str()
+            .filter(|s| !s.trim().is_empty());
+        if status["loggedIn"] != true
+            || !matches!(
+                status["authMethod"].as_str(),
+                Some("claude.ai" | "oauth_token")
+            )
+            || email.is_none()
+            || status["email"].as_str() != email
+            || status["orgId"] != identity.organization_uuid
+        {
+            return Err("Claude could not confirm the account for local usage.".into());
+        }
+    }
     normalize_usage_cache(
         serde_json::to_value(accounting).map_err(|_| "Cannot decode Claude account usage.")?,
         now,
@@ -81,6 +114,28 @@ pub fn executable() -> Result<std::path::PathBuf, String> {
     paths.into_iter().map(|path| path.join(if cfg!(windows) { "claude.exe" } else { "claude" }))
         .find(|path| path.is_file())
         .ok_or_else(|| "Claude CLI was not found. Install the native CLI and sign in with your Claude subscription.".into())
+}
+
+pub(crate) async fn current_account_id() -> Option<String> {
+    use std::process::Stdio;
+    let mut command = tokio::process::Command::new(executable().ok()?);
+    command
+        .args(["--safe-mode", "auth", "status"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let mut child = command.spawn().ok()?;
+    let bytes = crate::claude_ping_runner::bounded_output(&mut child, 15)
+        .await
+        .ok()?;
+    let status = serde_json::from_slice(&bytes).ok()?;
+    let cache = tauri::async_runtime::spawn_blocking(move || read_signed_in_cache(Some(&status)))
+        .await
+        .ok()?;
+    crate::refreshed_account(&cache)
 }
 
 pub async fn collect() -> Result<Value, String> {
@@ -479,10 +534,32 @@ mod tests {
         let value = json!({"oauthAccount":{"accountUuid":"one","organizationUuid":"org"},
             "cachedUsageUtilization":{"accountUuid":"one","fetchedAtMs":1000000,"utilization":{"five_hour":null,"seven_day":null}},
             "projects":"x".repeat(5*1024*1024)});
-        let snapshot = read_usage_config(value.to_string().as_bytes(), 1000).unwrap();
+        let snapshot = read_usage_config(value.to_string().as_bytes(), 1000, None).unwrap();
         assert!(snapshot.get("projects").is_none());
         assert_eq!(snapshot["accountId"], "claude:[\"one\",\"org\"]");
     }
+    #[test]
+    fn log_account_confirmation_requires_the_same_authenticated_login_and_organization() {
+        let cache = br#"{"oauthAccount":{"accountUuid":"one","organizationUuid":"org","emailAddress":"one@example.invalid"},
+            "cachedUsageUtilization":{"accountUuid":"one","fetchedAtMs":1000000,"utilization":{"five_hour":null}}}"#;
+        let login = json!({"loggedIn":true,"authMethod":"claude.ai","email":"one@example.invalid","orgId":"org"});
+        let confirm = |status: &Value| read_usage_config(&cache[..], 1000, Some(status));
+        let snapshot = confirm(&login).unwrap();
+        assert_eq!(snapshot["accountId"], "claude:[\"one\",\"org\"]");
+        assert!(!snapshot.to_string().contains("one@example.invalid"));
+        for (key, value) in [
+            ("loggedIn", json!(false)),
+            ("authMethod", json!("api_key")),
+            ("email", json!("two@example.invalid")),
+            ("orgId", json!("other")),
+            ("email", Value::Null),
+        ] {
+            let mut changed = login.clone();
+            changed[key] = value;
+            assert!(confirm(&changed).is_err());
+        }
+    }
+
     #[test]
     fn idle_optional_allowances_do_not_invalidate_the_account_read() {
         let mut value = json!({"oauthAccount":{"accountUuid":"one","organizationUuid":"org"},
@@ -528,6 +605,50 @@ mod tests {
         assert_eq!(snapshot["windows"][1]["remainingPercent"], 0.0);
     }
     use serde_json::json;
+
+    fn five_hour_cache(reset: &str, now: u64) -> Value {
+        json!({
+            "oauthAccount": {"accountUuid": "one", "organizationUuid": "org"},
+            "cachedUsageUtilization": {
+                "accountUuid": "one", "fetchedAtMs": now * 1000,
+                "utilization": {"five_hour": {"utilization": 25, "resets_at": reset}}
+            }
+        })
+    }
+
+    #[test]
+    fn offset_resets_use_utc_seconds_across_dst_and_year_rollover() {
+        for (reset, seconds) in [
+            ("2026-03-08T01:59:59-05:00", 1_772_953_199),
+            ("2026-03-08T03:00:00-04:00", 1_772_953_200),
+            ("2026-11-01T01:30:00-04:00", 1_793_511_000),
+            ("2026-11-01T01:30:00-05:00", 1_793_514_600),
+            ("2027-01-01T00:30:00.999+01:00", 1_798_759_800),
+            ("2026-12-31T23:30:00Z", 1_798_759_800),
+        ] {
+            let cache = five_hour_cache(reset, seconds - 1);
+            let active = normalize_usage_cache(cache.clone(), seconds - 1).unwrap();
+            assert_eq!(active["windows"][0]["resetsAt"], seconds, "{reset}");
+            assert_eq!(active["fiveHourState"], "active", "{reset}");
+
+            let expired = normalize_usage_cache(cache, seconds).unwrap();
+            assert_eq!(expired["fiveHourReset"], seconds, "{reset}");
+            assert_eq!(expired["fiveHourState"], "expired", "{reset}");
+            assert_eq!(expired["windows"], json!([]), "{reset}");
+        }
+    }
+
+    #[test]
+    fn measured_allowance_rejects_invalid_or_unqualified_reset_dates() {
+        for reset in [
+            "2026-11-01T01:30:00",
+            "2026-02-30T12:00:00Z",
+            "1969-12-31T23:59:59Z",
+        ] {
+            let result = normalize_usage_cache(five_hour_cache(reset, 1000), 1000);
+            assert!(result.unwrap_err().contains("reset time"), "{reset}");
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

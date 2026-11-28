@@ -2,6 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
+import { updateView } from './update-view';
 import { openMobileSync } from './mobile-sync';
 import { emptyFilter, usageLogPage, type UsageFilter, type UsageList } from './usage-log';
 import { awayUsagePanel, consistencyPage, ledgerCsv, remainingWorth, type AwayAccounts, type AwayReview, type Computers, type LedgerProvider, type Ledgers } from './consistency';
@@ -136,7 +137,7 @@ async function loadUsage() {
     const list = await invoke<UsageList>('usage_list', { provider, filter: rest, csv: false });
     if (request === usageRequest) { usageList = list; usageError = null; }
   } catch (error) { if (request === usageRequest) { usageList = null; usageError = String(error); } }
-  if (request === usageRequest && page === 'usage') render();
+  if (request === usageRequest && page === 'usage') render('refresh');
 }
 function showUsage(change: Partial<UsageFilter>) {
   usageFilter = { ...currentUsageFilter(), page: 0, ...change };
@@ -271,7 +272,7 @@ function history() {
   if (!sources.includes(historyProvider)) historyProvider = sources[0];
   const snapshot = historyProvider === 'codex' ? state.snapshot : historyProvider === 'claude' ? state.claude : historyProvider === 'antigravity' ? state.antigravity : state.openrouter;
   const description = historyProvider === 'codex' ? 'Provider-reported account day buckets, retained across refreshes. Provider day labels are preserved; the newest day can be incomplete or delayed.' : historyProvider === 'claude' ? 'Local Claude Code tokens collected while this dashboard was running, grouped by UTC day. Includes input, output, cache reads and cache creation. This is observed history, not account lifetime usage.' : historyProvider === 'antigravity' ? 'Local Antigravity tokens read from CLI, App, and IDE session transcripts on this device, grouped by UTC day. Includes fresh input, output, and cache reads. Enable Local session logs in Settings to collect them.' : 'Account token reports for completed UTC days. Today is unavailable. Imports update the previous 30 days and retain older days. Input plus output; cache and reasoning subsets are not counted again. Replacing the management key starts separate history.';
-  return `<section class="panel"><div class="section-heading"><h2>Daily token history</h2><select id="history-provider" aria-label="Token history source">${sources.map(value => `<option value="${value}" ${historyProvider === value ? 'selected' : ''}>${providerNames[value]}${value === 'claude' || value === 'antigravity' ? ' · local observed' : value === 'openrouter' ? ' · imported' : ' account'}</option>`).join('')}</select></div><p class="support">${description}</p>${snapshot?.dailyUsage.length ? `<table><caption class="sr-only">${historyProvider} daily token totals</caption><thead><tr><th scope="col">${historyProvider === 'codex' ? 'Provider day' : 'UTC day'}</th><th scope="col" class="numeric">Tokens</th></tr></thead><tbody>${[...snapshot.dailyUsage].reverse().map(day => `<tr><td>${escape(day.date)}</td><td class="numeric">${metric(day.tokens)}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">No daily history has been reported.</p>'}</section>`;
+  return `<section class="panel"><div class="section-heading"><h2>Daily token history</h2><select id="history-provider" aria-label="Token history source">${sources.map(value => `<option value="${value}" ${historyProvider === value ? 'selected' : ''}>${providerNames[value]}${value === 'claude' || value === 'antigravity' ? ' · local observed' : value === 'openrouter' ? ' · imported' : ' account'}</option>`).join('')}</select></div><p class="support">${description}</p>${snapshot?.dailyUsage.length ? `<table><caption class="sr-only">${escape(historyProvider)} daily token totals</caption><thead><tr><th scope="col">${historyProvider === 'codex' ? 'Provider day' : 'UTC day'}</th><th scope="col" class="numeric">Tokens</th></tr></thead><tbody>${[...snapshot.dailyUsage].reverse().map(day => `<tr><td>${escape(day.date)}</td><td class="numeric">${metric(day.tokens)}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">No daily history has been reported.</p>'}</section>`;
 }
 function connections() {
   settingsDraft ??= structuredClone(state.settings);
@@ -285,7 +286,7 @@ function connections() {
     grok: 'Signed-in Grok CLI · included allowance and prepaid balance when supplied',
     openrouter: 'Management key · prepaid account credits and imported token history',
   };
-  return `<section class="panel settings-panel"><h2>${state.needsSetup ? 'Welcome. Choose the accounts you use.' : 'Settings'}</h2>
+  return `<section id="provider-preferences" class="panel settings-panel"><h2>${state.needsSetup ? 'Welcome. Choose the accounts you use.' : 'Settings'}</h2>
     <p class="support">Monitor any combination of accounts. Turning a provider off pauses collection and hides its cards; saved history and credentials stay on this device.</p>
     <form id="preferences"><fieldset ${setupBusy ? 'disabled' : ''}><legend>Providers to monitor</legend><div class="provider-options">${(Object.keys(providerNames) as Provider[]).map(provider => `<label class="setting-choice"><input id="provider-${provider}" type="checkbox" data-provider="${provider}" ${draft.providers[provider] ? 'checked' : ''}><span><strong>${providerNames[provider]}</strong><small>${descriptions[provider]}</small></span></label>`).join('')}</div></fieldset>
     <fieldset ${setupBusy ? 'disabled' : ''}><legend>Tray icon and compact strip</legend><label class="setting-mode" for="compact-mode">Allowance windows <select id="compact-mode"><option value="auto" ${draft.compactWindows == null ? 'selected' : ''}>Choose automatically</option><option value="custom" ${draft.compactWindows != null ? 'selected' : ''}>Choose up to four</option></select></label>
@@ -311,7 +312,7 @@ function usageRelayPanel() {
   if (usageRelay === undefined) { if (!usageRelayLoading) { usageRelayLoading = true; void loadUsageRelay(); } return ''; }
   const intro = '<p>Shares per-request token counts between your own computers, and receives usage from Claude Code cloud sessions, through your relay. The relay keeps token counts, model and request identifiers for 14 days; prompts, content and email addresses are dropped before storage. Off unless you set it up.</p>';
   const body = usageRelay ? `<p class="support">Connected to ${escape(usageRelay.endpoint)}.</p>
-    <h3>Claude Code cloud sessions</h3><p class="support">Paste this into each cloud environment's <strong>Setup script</strong>, and add <strong>${escape(hostOf(usageRelay.endpoint))}</strong> to its allowed domains under Network access. New cloud sessions then report their token usage here. Cloud environments drop variables named OTEL_…, so the script writes Claude Code's own settings instead. It contains this channel's write secret; keep it private.</p>
+    <h3>Claude Code cloud sessions</h3><p class="support">Paste this into each cloud environment's <strong>Setup script</strong>, replacing any previous m-dash setup. Remove any old direct relay URL from the environment variables. Add <strong>${escape(hostOf(usageRelay.endpoint))}</strong> to its allowed domains under Network access. New sessions use a local forwarder that keeps exporter headers inside the cloud VM. The script contains this channel's write secret. Keep it private.</p>
     <textarea id="usage-relay-env" class="code-block" readonly rows="6" aria-label="Cloud environment setup script">${escape(usageRelay.cloudSetup)}</textarea><button id="copy-usage-env" class="text-button" type="button">Copy setup script</button>
     <h3>Your other computers</h3><p class="support">On another computer running m-dash, paste this code under <strong>Join a usage channel</strong>. Anyone with it can read your shared usage; keep it private.</p>
     <textarea id="usage-relay-code" class="code-block" readonly rows="2" aria-label="Usage channel code">${escape(usageRelay.code)}</textarea><button id="copy-usage-code" class="text-button" type="button">Copy code</button>
@@ -322,12 +323,12 @@ function usageRelayPanel() {
     <button id="usage-relay-create" class="refresh" type="button" ${setupBusy ? 'disabled' : ''}>Create usage channel</button>
     <label class="setting-mode" for="usage-relay-join">Join a usage channel <input id="usage-relay-join" type="password" autocomplete="off" placeholder="mdash-usage1:…"></label>
     <button id="usage-relay-join-button" class="text-button" type="button" ${setupBusy ? 'disabled' : ''}>Join</button>`;
-  return `<section class="panel settings-panel"><h2>Cloud sessions and other computers</h2>${intro}${body}${noticeLine('usageRelay')}</section>`;
+  return `<section id="usage-relay-panel" class="panel settings-panel"><h2>Cloud sessions and other computers</h2>${intro}${body}${noticeLine('usageRelay')}</section>`;
 }
 async function loadUsageRelay() {
   try { usageRelay = await invoke<UsageRelay | null>('usage_relay_status'); usageRelayEndpoint = (await invoke<string | null>('sync_relay')) ?? ''; }
   catch (error) { usageRelay = null; setNotice('usageRelay', typeof error === 'string' ? error : 'The usage channel could not be read.'); }
-  render();
+  render('refresh');
 }
 async function usageRelayAction(command: string, args: Record<string, unknown>, done: string) {
   setupBusy = true; notice = null; render();
@@ -335,7 +336,35 @@ async function usageRelayAction(command: string, args: Record<string, unknown>, 
   catch (error) { setNotice('usageRelay', typeof error === 'string' ? error : 'The usage channel could not be changed.'); }
   setupBusy = false; render();
 }
-function render() {
+function usageChannelId(code: string): string | null {
+  // The native status exposes the public ID inside the versioned join code.
+  const encoded = /^mdash-usage1:([\w-]+)$/.exec(code)?.[1];
+  if (!encoded) return null;
+  try {
+    const { id } = JSON.parse(atob(encoded.replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof id === 'string' && /^[\w-]{43}$/.test(id) ? id : null;
+  } catch { return null; }
+}
+async function deleteUsageChannel() {
+  const channel = usageRelay;
+  if (!channel || setupBusy) return;
+  const id = usageChannelId(channel.code);
+  if (!id) {
+    setNotice('usageRelay', 'The channel ID could not be read. The channel was kept.');
+    render('refresh');
+    return;
+  }
+  const confirmed = await confirmAction('usage-relay-delete', 'Delete channel and shared rows?',
+    `<p>This permanently deletes usage channel <strong>${escape(id)}</strong> on <strong>${escape(channel.endpoint)}</strong> and all its shared rows from the relay. Other computers and cloud sessions will lose access.</p>`,
+    'Delete channel and shared rows');
+  if (confirmed && usageRelay === channel && !setupBusy) {
+    await usageRelayAction('usage_relay_leave', { delete: true }, 'Channel deleted from the relay. Other computers and cloud sessions can no longer use it.');
+    if (document.activeElement === document.body) {
+      document.getElementById(usageRelay ? 'usage-relay-delete' : 'usage-relay-endpoint')?.focus();
+    }
+  }
+}
+function render(mode: 'replace' | 'refresh' = 'replace') {
   if (page === 'consistency' && !awayOpened) {
     const now = Date.now();
     away.start = localDateTime(now - 8 * 3600_000);
@@ -346,97 +375,111 @@ function render() {
   const focusId = focused?.id;
   const focusPage = focused?.dataset.page;
   const enabledCount = Object.values(state.settings.providers).filter(Boolean).length;
-  root.innerHTML = `<header><div class="brand"><div class="brand-mark" aria-hidden="true">M<span>-</span></div><div><strong>m-dash</strong><span>AI resource monitor</span></div></div><div class="header-end"><div class="header-status"><span class="status-dot"></span>Local to this device</div><img class="portfolio-mark" src="${brandMark}" alt="CND monogram" width="84" height="63"></div></header>
+  const html = `<header><div class="brand"><div class="brand-mark" aria-hidden="true">M<span>-</span></div><div><strong>m-dash</strong><span>AI resource monitor</span></div></div><div class="header-end"><div class="header-status"><span class="status-dot"></span>Local to this device</div><img class="portfolio-mark" src="${brandMark}" alt="CND monogram" width="84" height="63"></div></header>
     <main><div class="title-row"><div><p class="eyebrow">YOUR AVAILABLE CAPACITY</p><h1>Know what’s left.</h1><p class="intro">Your AI allowances, credits, and resets. Sources always in view.</p></div><button id="refresh" class="refresh" ${state.refreshing || !enabledCount ? 'disabled' : ''}>${state.refreshing ? 'Refreshing…' : 'Refresh accounts'}</button></div>
     <nav aria-label="Dashboard views">${(['overview', 'history', 'consistency', 'usage', 'connections'] as const).map(tab => `<button data-page="${tab}" class="tab ${page === tab ? 'active' : ''}" aria-current="${page === tab ? 'page' : 'false'}">${tab === 'history' ? 'Daily history' : tab === 'consistency' ? 'Allowance vs tokens' : tab === 'usage' ? 'Usage log' : tab === 'connections' ? 'Settings' : 'Overview'}</button>`).join('')}<span>${enabledCount ? `${enabledCount} provider${enabledCount === 1 ? '' : 's'} enabled` : 'Collection paused'}</span></nav>
     ${appError ? `<div class="error" role="alert">${escape(appError)}</div>` : ''}
     ${state.settings.providers.codex && state.error ? `<div class="error" role="status"><strong>Couldn’t refresh Codex.</strong> ${escape(state.error)}${state.snapshot ? ' Showing the last successful observation.' : ''}</div>` : ''}
-    ${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? noticeLine('ledger') + awayUsagePanel(away, state.consistency, state.settings.providers) + consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled, state.ledgerDays || 28, state.computers ?? {}, state.usageChannel ?? false) : page === 'usage' ? usageLogPage(currentUsageFilter(), usageList, usageError, ledgerProviders(), state.consistency ?? {}) : connections()}
+    <div id="dashboard-page">${page === 'overview' ? overview() : page === 'history' ? history() : page === 'consistency' ? noticeLine('ledger') + awayUsagePanel(away, state.consistency, state.settings.providers) + consistencyPage(state.consistency ?? {}, state.settings.providers, state.settings.localLogs, state.claudeEnabled, state.ledgerDays || 28, state.computers ?? {}, state.usageChannel ?? false) : page === 'usage' ? usageLogPage(currentUsageFilter(), usageList, usageError, ledgerProviders(), state.consistency ?? {}) : connections()}</div>
     <footer><span>m-dash ${escape(appVersion)} · Use the tray to open, refresh or quit</span><span>${state.nextRefresh ? `Next refresh ${dateTime(state.nextRefresh)}` : enabledCount ? 'Connect an account to collect readings' : 'Collection paused'}</span></footer></main>`;
-  root.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => { void refresh(); });
-  root.querySelector<HTMLInputElement>('#away-start')?.addEventListener('input', event => { away.start = (event.target as HTMLInputElement).value; });
-  root.querySelector<HTMLInputElement>('#away-end')?.addEventListener('input', event => { away.end = (event.target as HTMLInputElement).value; });
-  root.querySelector<HTMLFormElement>('#away-review')?.addEventListener('submit', event => {
+  if (mode === 'refresh') updateView(root, html);
+  else root.innerHTML = html;
+  if (focused?.isConnected) return;
+  if (focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
+  else if (focusPage) root.querySelector<HTMLButtonElement>(`[data-page="${focusPage}"]`)?.focus({ preventScroll: true });
+}
+
+function bindActions() {
+  function on<K extends keyof HTMLElementEventMap>(type: K, selector: string, action: (control: HTMLElement, event: HTMLElementEventMap[K]) => void) {
+    root.addEventListener(type, event => {
+      const control = event.target instanceof Element && event.target.closest<HTMLElement>(selector);
+      if (control) action(control, event);
+    });
+  }
+  const click = (selector: string, action: (control: HTMLElement) => void) => on('click', selector, action);
+  click('#refresh', refresh);
+  on('input', '#away-start', control => { away.start = (control as HTMLInputElement).value; });
+  on('input', '#away-end', control => { away.end = (control as HTMLInputElement).value; });
+  on('submit', '#away-review', (_, event) => {
     event.preventDefault();
     if (!away.busy) void reviewAwayUsage();
   });
-  root.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(button => button.addEventListener('click', () => { page = button.dataset.page as typeof page; notice = null; if (page === 'usage') { usageList = undefined; void loadUsage(); } render(); }));
-  root.querySelectorAll<HTMLElement>('[data-usage-provider]').forEach(element => {
-    const open = () => showUsage({ provider: element.dataset.usageProvider as LedgerProvider, ...(element.dataset.usageDay ? { date: element.dataset.usageDay, where: '', model: '', purpose: '' } : { date: '', where: element.dataset.usageWhere ?? '', model: element.dataset.usageModel ?? '', purpose: element.dataset.usagePurpose ?? '' }) });
-    element.addEventListener('click', open);
-    element.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
-  });
-  const usageInput = (id: string, change: (value: string) => Partial<UsageFilter>) => root.querySelector<HTMLInputElement | HTMLSelectElement>(id)?.addEventListener('change', event => showUsage(change((event.target as HTMLInputElement).value)));
+  click('[data-page]', button => { page = button.dataset.page as typeof page; notice = null; if (page === 'usage') { usageList = undefined; void loadUsage(); } render(); });
+  const openUsage = (element: HTMLElement) => showUsage({ provider: element.dataset.usageProvider as LedgerProvider, ...(element.dataset.usageDay ? { date: element.dataset.usageDay, where: '', model: '', purpose: '' } : { date: '', where: element.dataset.usageWhere ?? '', model: element.dataset.usageModel ?? '', purpose: element.dataset.usagePurpose ?? '' }) });
+  click('[data-usage-provider]', openUsage);
+  on('keydown', 'tr[data-usage-provider]', (row, event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openUsage(row); } });
+  const usageInput = (id: string, change: (value: string) => Partial<UsageFilter>) => on('change', id, control => showUsage(change((control as HTMLInputElement | HTMLSelectElement).value)));
   usageInput('#usage-provider', value => ({ provider: value as LedgerProvider, where: '', model: '', purpose: '' }));
   usageInput('#usage-days', value => value ? { days: Number(value), date: '' } : {});
   usageInput('#usage-date', value => ({ date: value }));
   usageInput('#usage-where', value => ({ where: value }));
   usageInput('#usage-model', value => ({ model: value }));
   usageInput('#usage-purpose', value => ({ purpose: value }));
-  root.querySelector<HTMLButtonElement>('#usage-reset')?.addEventListener('click', () => showUsage({ ...emptyFilter(currentUsageFilter().provider, state.ledgerDays || 28) }));
-  root.querySelector<HTMLButtonElement>('#usage-prev')?.addEventListener('click', () => { const filter = currentUsageFilter(); showUsage({ page: Math.max(0, filter.page - 1) }); });
-  root.querySelector<HTMLButtonElement>('#usage-next')?.addEventListener('click', () => { const filter = currentUsageFilter(); showUsage({ page: filter.page + 1 }); });
-  root.querySelector<HTMLButtonElement>('#copy-usage')?.addEventListener('click', event => {
-    const button = event.currentTarget as HTMLButtonElement;
+  click('#usage-reset', () => showUsage({ ...emptyFilter(currentUsageFilter().provider, state.ledgerDays || 28) }));
+  click('#usage-prev', () => { const filter = currentUsageFilter(); showUsage({ page: Math.max(0, filter.page - 1) }); });
+  click('#usage-next', () => { const filter = currentUsageFilter(); showUsage({ page: filter.page + 1 }); });
+  click('#copy-usage', button => {
     const { provider, ...rest } = currentUsageFilter();
     void invoke<{ csv: string; truncated: boolean }>('usage_list', { provider, filter: rest, csv: true })
       .then(result => navigator.clipboard.writeText(result.csv).then(() => { button.textContent = result.truncated ? 'Copied first 20,000' : 'Copied'; }))
       .catch(() => { button.textContent = 'Copy failed'; });
   });
-  root.querySelector<HTMLSelectElement>('#history-provider')?.addEventListener('change', event => { historyProvider = (event.target as HTMLSelectElement).value as typeof historyProvider; render(); });
-  root.querySelector<HTMLButtonElement>('#mobile-sync')?.addEventListener('click', openMobileSync);
-  const copy = (button: string, source: string) => root.querySelector<HTMLButtonElement>(button)?.addEventListener('click', event => {
-    const target = event.currentTarget as HTMLButtonElement;
+  on('change', '#history-provider', control => {
+    const next = (control as HTMLSelectElement).value;
+    if (next === 'codex' || next === 'claude' || next === 'antigravity' || next === 'openrouter') historyProvider = next;
+    render();
+  });
+  click('#mobile-sync', openMobileSync);
+  const copy = (button: string, source: string) => click(button, target => {
     navigator.clipboard.writeText(root.querySelector<HTMLTextAreaElement>(source)!.value).then(() => { target.textContent = 'Copied'; }, () => { target.textContent = 'Copy failed'; });
   });
   copy('#copy-usage-env', '#usage-relay-env'); copy('#copy-usage-code', '#usage-relay-code');
-  root.querySelector<HTMLButtonElement>('#usage-relay-create')?.addEventListener('click', () => { void usageRelayAction('usage_relay_create', { endpoint: root.querySelector<HTMLInputElement>('#usage-relay-endpoint')!.value.trim(), enrollment: root.querySelector<HTMLInputElement>('#usage-relay-enrollment')!.value.trim() }, 'Usage channel created. Add the variables to your cloud environments and the code to your other computers.'); });
-  root.querySelector<HTMLButtonElement>('#usage-relay-join-button')?.addEventListener('click', () => { void usageRelayAction('usage_relay_join', { code: root.querySelector<HTMLInputElement>('#usage-relay-join')!.value }, 'Joined. Shared usage arrives with the next refresh.'); });
-  root.querySelector<HTMLButtonElement>('#usage-relay-leave')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: false }, 'This computer left the usage channel. Shared rows already received are kept.'); });
-  root.querySelector<HTMLButtonElement>('#usage-relay-delete')?.addEventListener('click', () => { void usageRelayAction('usage_relay_leave', { delete: true }, 'Channel deleted from the relay. Other computers and cloud sessions can no longer use it.'); });
+  click('#usage-relay-create', () => { void usageRelayAction('usage_relay_create', { endpoint: root.querySelector<HTMLInputElement>('#usage-relay-endpoint')!.value.trim(), enrollment: root.querySelector<HTMLInputElement>('#usage-relay-enrollment')!.value.trim() }, 'Usage channel created. Add the variables to your cloud environments and the code to your other computers.'); });
+  click('#usage-relay-join-button', () => { void usageRelayAction('usage_relay_join', { code: root.querySelector<HTMLInputElement>('#usage-relay-join')!.value }, 'Joined. Shared usage arrives with the next refresh.'); });
+  click('#usage-relay-leave', () => { void usageRelayAction('usage_relay_leave', { delete: false }, 'This computer left the usage channel. Shared rows already received are kept.'); });
+  click('#usage-relay-delete', deleteUsageChannel);
   const ledgerAction = (command: string, args: Record<string, unknown>) => { void invoke<Dashboard>(command, args).then(next => { state = next; setNotice('ledger', ''); render(); }, error => { setNotice('ledger', String(error)); render(); }); };
-  root.querySelector<HTMLButtonElement>('#device-name-save')?.addEventListener('click', () => { ledgerAction('set_device_name', { name: root.querySelector<HTMLInputElement>('#device-name')!.value }); });
-  root.querySelectorAll<HTMLButtonElement>('[data-ledger-add]').forEach(button => button.addEventListener('click', () => {
+  click('#device-name-save', () => { ledgerAction('set_device_name', { name: root.querySelector<HTMLInputElement>('#device-name')!.value }); });
+  click('[data-ledger-add]', button => {
     const provider = button.dataset.ledgerAdd!;
     ledgerAction('add_ledger_mark', { provider, date: root.querySelector<HTMLInputElement>(`#ledger-date-${provider}`)!.value, plan: root.querySelector<HTMLInputElement>(`#ledger-plan-${provider}`)!.checked, text: root.querySelector<HTMLInputElement>(`#ledger-text-${provider}`)!.value });
-  }));
-  root.querySelectorAll<HTMLButtonElement>('[data-ledger-remove]').forEach(button => button.addEventListener('click', () => {
+  });
+  click('[data-ledger-remove]', button => {
     ledgerAction('remove_ledger_mark', { provider: button.dataset.ledgerRemove, at: Number(button.dataset.at), kind: button.dataset.kind });
-  }));
-  root.querySelectorAll<HTMLButtonElement>('[data-ledger-days]').forEach(button => button.addEventListener('click', () => {
+  });
+  click('[data-ledger-days]', button => {
     void invoke<Dashboard>('set_ledger_days', { days: Number(button.dataset.ledgerDays) }).then(next => { state = next; render(); }, error => { setNotice('ledger', String(error)); render(); });
-  }));
-  root.querySelector<HTMLButtonElement>('#copy-ledger')?.addEventListener('click', event => {
-    const button = event.currentTarget as HTMLButtonElement;
+  });
+  click('#copy-ledger', button => {
     navigator.clipboard.writeText(ledgerCsv(state.consistency ?? {})).then(() => { button.textContent = 'Copied'; }, () => { button.textContent = 'Copy failed'; });
   });
-  root.querySelector<HTMLButtonElement>('#claude-ping-toggle')?.addEventListener('click', () => { void toggleClaudePing(); });
-  root.querySelector<HTMLButtonElement>('#claude-toggle')?.addEventListener('click', () => { void toggleClaude(); });
-  root.querySelector<HTMLButtonElement>('#openrouter-settings')?.addEventListener('click', () => { void invoke('open_openrouter_settings').catch(error => { setNotice('openrouter', String(error)); render(); }); });
-  root.querySelector<HTMLButtonElement>('#openrouter-connect')?.addEventListener('click', () => { void setupOpenRouter(true); });
-  root.querySelector<HTMLButtonElement>('#openrouter-disconnect')?.addEventListener('click', () => { void setupOpenRouter(false); });
-  root.querySelector<HTMLFormElement>('#preferences')?.addEventListener('submit', event => { event.preventDefault(); void savePreferences(); });
-  root.querySelector<HTMLButtonElement>('#discard-settings')?.addEventListener('click', () => { settingsDraft = structuredClone(state.settings); notice = null; render(); });
-  root.querySelectorAll<HTMLInputElement>('[data-provider]').forEach(input => input.addEventListener('change', () => {
+  click('#claude-ping-toggle', toggleClaudePing);
+  click('#claude-toggle', toggleClaude);
+  click('#openrouter-settings', () => { void invoke('open_openrouter_settings').catch(error => { setNotice('openrouter', String(error)); render(); }); });
+  click('#openrouter-connect', () => { void setupOpenRouter(true); });
+  click('#openrouter-disconnect', () => { void setupOpenRouter(false); });
+  on('submit', '#preferences', (_, event) => { event.preventDefault(); void savePreferences(); });
+  click('#discard-settings', () => { settingsDraft = structuredClone(state.settings); notice = null; render(); });
+  on('change', '[data-provider]', control => {
+    const input = control as HTMLInputElement;
     const draft = settingsDraft!;
     draft.providers[input.dataset.provider as Provider] = input.checked;
     if (draft.compactWindows) draft.compactWindows = draft.compactWindows.filter(id => draft.providers[compactChoices.find(choice => choice.id === id)!.provider]);
     render();
-  }));
-  root.querySelector<HTMLInputElement>('#local-logs')?.addEventListener('change', event => { settingsDraft!.localLogs = (event.target as HTMLInputElement).checked; });
-  root.querySelector<HTMLSelectElement>('#compact-mode')?.addEventListener('change', event => {
-    settingsDraft!.compactWindows = (event.target as HTMLSelectElement).value === 'auto' ? null : compactChoices.filter(choice => settingsDraft!.providers[choice.provider]).slice(0, 4).map(choice => choice.id);
+  });
+  on('change', '#local-logs', control => { settingsDraft!.localLogs = (control as HTMLInputElement).checked; });
+  on('change', '#compact-mode', control => {
+    settingsDraft!.compactWindows = (control as HTMLSelectElement).value === 'auto' ? null : compactChoices.filter(choice => settingsDraft!.providers[choice.provider]).slice(0, 4).map(choice => choice.id);
     render();
   });
-  root.querySelectorAll<HTMLInputElement>('[data-window]').forEach(input => input.addEventListener('change', () => {
+  on('change', '[data-window]', control => {
+    const input = control as HTMLInputElement;
     const selected = settingsDraft!.compactWindows!;
     const id = input.dataset.window as CompactWindow;
     if (input.checked && selected.length >= 4) { setNotice('preferences', 'Choose at most four allowance windows. Uncheck one before adding another.'); }
     else { settingsDraft!.compactWindows = input.checked ? [...selected, id] : selected.filter(window => window !== id); notice = null; }
     render();
-  }));
-  if (focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
-  else if (focusPage) root.querySelector<HTMLButtonElement>(`[data-page="${focusPage}"]`)?.focus({ preventScroll: true });
+  });
 }
 async function savePreferences() {
   if (!settingsDraft) return;
@@ -450,22 +493,19 @@ async function savePreferences() {
   } catch (error) { setNotice('preferences', typeof error === 'string' ? error : 'Settings could not be saved. Your previous choices were retained.'); }
   setupBusy = false; render();
 }
-function confirmClaudePing(): Promise<boolean> {
+function confirmAction(triggerId: string, title: string, message: string, action: string): Promise<boolean> {
   const dialog = document.createElement('dialog');
-  dialog.className = 'ping-confirm';
-  dialog.setAttribute('aria-labelledby', 'ping-confirm-title');
-  dialog.innerHTML = `<h2 id="ping-confirm-title">Enable automatic Claude pings?</h2>
-    <p>When an eligible five-hour window is idle, m-dash will send the prompt <strong>ping</strong> through your signed-in Claude Code CLI using <strong>Haiku 5.5 at low effort</strong>.</p>
-    <p><strong>This consumes subscription usage, including applicable weekly allowance.</strong> The CLI adds context, so the request uses more than the word “ping” and its exact token cost is not fixed.</p>
-    <p><strong>If extra usage is enabled with Claude, it may also consume paid credits.</strong> Starting a window does not refill your allowance immediately or guarantee capacity later.</p>
-    <p>This applies to your current Claude account on this computer. Enable it on only one computer per account. You can turn it off at any time.</p>
-    <form method="dialog" class="settings-actions"><button value="cancel" autofocus>Cancel</button><button value="enable" class="refresh">Enable automatic pings</button></form>`;
+  dialog.className = 'confirm-dialog';
+  dialog.setAttribute('aria-labelledby', 'confirm-title');
+  dialog.setAttribute('aria-describedby', 'confirm-message');
+  dialog.innerHTML = `<h2 id="confirm-title">${escape(title)}</h2><div id="confirm-message">${message}</div>
+    <form method="dialog" class="settings-actions"><button value="cancel" autofocus>Cancel</button><button value="confirm" class="refresh">${escape(action)}</button></form>`;
   document.body.append(dialog);
   return new Promise(resolve => {
     dialog.addEventListener('close', () => {
-      const confirmed = dialog.returnValue === 'enable';
+      const confirmed = dialog.returnValue === 'confirm';
       dialog.remove();
-      document.getElementById('claude-ping-toggle')?.focus();
+      document.getElementById(triggerId)?.focus();
       resolve(confirmed);
     }, { once: true });
     dialog.showModal();
@@ -473,7 +513,12 @@ function confirmClaudePing(): Promise<boolean> {
 }
 async function toggleClaudePing() {
   const enabled = !state.claudePing.enabled;
-  if (enabled && !(await confirmClaudePing())) return;
+  if (enabled && !(await confirmAction('claude-ping-toggle', 'Enable automatic Claude pings?',
+    `<p>When an eligible five-hour window is idle, m-dash will send the prompt <strong>ping</strong> through your signed-in Claude Code CLI using <strong>Haiku 5.5 at low effort</strong>.</p>
+    <p><strong>This consumes subscription usage, including applicable weekly allowance.</strong> The CLI adds context, so the request uses more than the word “ping” and its exact token cost is not fixed.</p>
+    <p><strong>If extra usage is enabled with Claude, it may also consume paid credits.</strong> Starting a window does not refill your allowance immediately or guarantee capacity later.</p>
+    <p>This applies to your current Claude account on this computer. Enable it on only one computer per account. You can turn it off at any time.</p>`,
+    'Enable automatic pings'))) return;
   setupBusy = true; notice = null; render();
   try {
     state = await invoke<Dashboard>('set_claude_ping', { enabled, confirmed: enabled });
@@ -494,11 +539,15 @@ async function setupOpenRouter(connect: boolean) {
   setupBusy = false; render();
 }
 async function refresh() {
-  state.refreshing = true; render();
+  state.refreshing = true; render('refresh');
   try { state = await invoke<Dashboard>('refresh_dashboard'); appError = ''; }
   catch { state.refreshing = false; appError = collectorUnavailable; }
-  render();
+  render('refresh');
 }
+function renderReadings() {
+  if (!root.matches(':active')) render('refresh');
+}
+bindActions();
 render();
 async function start() {
   if (!isTauri()) {
@@ -506,7 +555,7 @@ async function start() {
     render(); return;
   }
   try {
-    await listen<Dashboard>('dashboard-updated', event => { state = event.payload; appError = ''; if (document.activeElement?.tagName !== 'SELECT' && !root.matches(':active')) render(); });
+    await listen<Dashboard>('dashboard-updated', event => { state = event.payload; appError = ''; renderReadings(); });
     appVersion = await getVersion().catch(() => '');
     state = await invoke<Dashboard>('get_dashboard');
     appError = '';
@@ -515,4 +564,4 @@ async function start() {
   } catch { appError = collectorUnavailable; render(); }
 }
 void start();
-setInterval(() => { if (!document.hidden && document.activeElement?.tagName !== 'SELECT' && !root.matches(':active')) render(); }, 30_000);
+setInterval(() => { if (!document.hidden) renderReadings(); }, 30_000);

@@ -1,5 +1,6 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
@@ -53,6 +54,48 @@ fn record_plan(db: &Connection, account: &str, at: i64, plan: Option<&str>) -> R
     }
     Ok(())
 }
+
+fn initialize_usage_events(db: &mut Connection) -> rusqlite::Result<()> {
+    let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (legacy, has_origin): (bool, bool) = transaction.query_row(
+        "SELECT COUNT(*)>0 AND COUNT(*) FILTER (WHERE name='upload_seq')=0,
+            COUNT(*) FILTER (WHERE name='origin')>0 FROM pragma_table_info('usage_events')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if legacy {
+        transaction.execute_batch("ALTER TABLE usage_events RENAME TO usage_events_legacy;")?;
+    }
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS usage_events (upload_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            account TEXT NOT NULL, source TEXT NOT NULL, key TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+            surface TEXT NOT NULL, model TEXT, effort TEXT, speed TEXT, query_source TEXT, agent TEXT, input INTEGER NOT NULL, output INTEGER NOT NULL,
+            cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, reasoning INTEGER, cost_micros INTEGER, origin TEXT, UNIQUE(account,key));",
+    )?;
+    if legacy {
+        let origin = if has_origin { "origin" } else { "NULL" };
+        // Keep existing cursor positions and start above any acknowledged row already pruned.
+        transaction.execute_batch(&format!(
+            "INSERT INTO usage_events (upload_seq,account,source,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros,origin)
+                SELECT rowid,account,source,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros,{origin}
+                FROM usage_events_legacy;
+            DROP TABLE usage_events_legacy;
+            INSERT INTO sqlite_sequence(name,seq) SELECT 'usage_events',0
+                WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='usage_events');
+            UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((
+                SELECT MAX(pushed) FROM (
+                    SELECT CASE WHEN json_valid(value) THEN json_extract(value,'$.pushed') END AS pushed
+                    FROM settings WHERE key GLOB 'usage-relay:*'
+                ) WHERE typeof(pushed)='integer'
+            ),0)) WHERE name='usage_events';"
+        ))?;
+    }
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS usage_events_time ON usage_events(account,occurred_at);",
+    )?;
+    transaction.commit()
+}
+
 impl Store {
     pub fn claude_ping(&self) -> Result<crate::claude_ping::State, String> {
         let value: Option<String> = self
@@ -273,12 +316,13 @@ impl Store {
                 ON CONFLICT(session) DO UPDATE SET account=excluded.account,updated_at=MAX(claude_sessions.updated_at,excluded.updated_at)",
                 params![event.session,event.account,event.occurred_at]).map_err(|_| "Cannot save Claude session identity.")?;
             if let (Some(request), Some(tokens)) = (&event.request, event.tokens) {
-                transaction
-                    .execute(
-                        "INSERT OR IGNORE INTO claude_requests VALUES (?1,?2,?3,?4)",
-                        params![event.account, request, event.occurred_at, tokens],
-                    )
-                    .map_err(|_| "Cannot save Claude token event.")?;
+                insert_claude_tokens(
+                    &transaction,
+                    &event.account,
+                    request,
+                    event.occurred_at,
+                    tokens,
+                )?;
                 if let Some(detail) = &event.detail {
                     insert_usage(
                         &transaction,
@@ -314,19 +358,26 @@ impl Store {
     }
 
     pub fn claude_snapshot(&self) -> Result<Option<Value>, String> {
-        let account: Option<String> = self.0.query_row("SELECT account FROM (SELECT account,updated_at,0 AS priority FROM claude_sessions WHERE account IS NOT NULL UNION ALL SELECT account,updated_at,1 AS priority FROM claude_account_usage UNION ALL SELECT value AS account,0 AS updated_at,2 AS priority FROM settings WHERE key='claude-current-account') ORDER BY priority DESC,updated_at DESC LIMIT 1",[],
+        let account: Option<String> = self.0.query_row("SELECT account FROM (
+            SELECT account,updated_at,0 AS priority FROM claude_sessions WHERE account IS NOT NULL
+            UNION ALL SELECT account,updated_at,1 FROM claude_account_usage
+            UNION ALL SELECT value,0,2 FROM settings WHERE key='claude-current-account'
+            UNION ALL SELECT account,observed_at,-1 FROM latest WHERE json_extract(snapshot,'$.provider')='claude'
+            ) ORDER BY priority DESC,updated_at DESC LIMIT 1",[],
             |row| row.get(0)).optional().map_err(|_| "Cannot read Claude account identity.")?;
         let Some(account) = account else {
             return Ok(None);
         };
         let quota: Option<(String,i64,String,Option<String>)> = self.0.query_row("SELECT quota,quota_at,source,(SELECT plan FROM claude_account_usage WHERE account=?1) FROM (SELECT quota,quota_at,'Claude Code statusline' AS source FROM claude_sessions WHERE account=?1 AND quota IS NOT NULL UNION ALL SELECT quota,quota_at,'Claude Code account usage' AS source FROM claude_account_usage WHERE account=?1) ORDER BY quota_at DESC LIMIT 1",[&account],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(|_| "Cannot read Claude quota history.")?;
-        // Days whose request detail was pruned survive only as retained daily totals.
-        let retained = "SELECT day,tokens FROM daily_tokens WHERE account=?1 AND day NOT IN (SELECT date(occurred_at,'unixepoch') FROM claude_requests WHERE account=?1)";
-        let (since,last): (Option<i64>,Option<i64>) = self.0.query_row(&format!("SELECT (SELECT MIN(start) FROM (SELECT MIN(occurred_at) AS start FROM claude_requests WHERE account=?1
-            UNION ALL SELECT CAST(strftime('%s',day) AS INTEGER) FROM ({retained}))),(SELECT MAX(occurred_at) FROM claude_requests WHERE account=?1)"),[&account],
+        let (since,last): (Option<i64>,Option<i64>) = self.0.query_row("SELECT
+            (SELECT MIN(start) FROM (SELECT MIN(occurred_at) AS start FROM claude_requests WHERE account=?1
+                UNION ALL SELECT unixepoch(MIN(day)) FROM pruned_days WHERE ledger='tokens' AND account=?1)),
+            (SELECT MAX(occurred_at) FROM claude_requests WHERE account=?1)",[&account],
             |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| "Cannot read Claude token totals.")?;
-        let mut statement = self.0.prepare(&format!("SELECT date(occurred_at,'unixepoch'),SUM(tokens) FROM claude_requests WHERE account=?1 GROUP BY 1 UNION ALL {retained} ORDER BY 1"))
+        let mut statement = self
+            .0
+            .prepare("SELECT day,tokens FROM daily_tokens WHERE account=?1 ORDER BY day")
             .map_err(|_| "Cannot read Claude daily history.")?;
         let days: Vec<Value> = statement
             .query_map([&account], |row| {
@@ -370,12 +421,19 @@ impl Store {
             .0
             .transaction()
             .map_err(|_| "Cannot begin pruning usage history.")?;
-        transaction.execute("INSERT INTO daily_tokens SELECT account,date(occurred_at,'unixepoch'),SUM(tokens) FROM claude_requests WHERE occurred_at<?1 GROUP BY 1,2
-            ON CONFLICT(account,day) DO UPDATE SET tokens=excluded.tokens", [request_cutoff]).map_err(|_| "Cannot retain Claude daily totals.")?;
-        transaction.execute("INSERT INTO usage_daily SELECT account,date(occurred_at,'unixepoch'),surface,COALESCE(model,''),COALESCE(query_source,''),
-            COUNT(*),SUM(input),SUM(output),SUM(cache_read),SUM(cache_write),SUM(reasoning),SUM(cost_micros) FROM usage_events WHERE occurred_at<?1 GROUP BY 1,2,3,4,5
-            ON CONFLICT(account,day,surface,model,query_source) DO UPDATE SET requests=excluded.requests,input=excluded.input,output=excluded.output,
-            cache_read=excluded.cache_read,cache_write=excluded.cache_write,reasoning=excluded.reasoning,cost_micros=excluded.cost_micros", [usage_cutoff])
+        remember_pruned_keys(&transaction, request_cutoff, usage_cutoff)
+            .map_err(|_| "Cannot retain pruned request accounting.")?;
+        // SUM preserves unknown metrics and aborts the transaction on integer overflow.
+        transaction.execute("WITH pending(account,day,surface,model,query_source,requests,input,output,cache_read,cache_write,reasoning,cost_micros) AS (
+            SELECT account,date(occurred_at,'unixepoch'),surface,COALESCE(model,''),COALESCE(query_source,''),
+                COUNT(*),SUM(input),SUM(output),SUM(cache_read),SUM(cache_write),SUM(reasoning),SUM(cost_micros)
+            FROM usage_events e WHERE occurred_at<?1 AND NOT EXISTS (
+                SELECT 1 FROM pruned_days WHERE ledger='usage' AND account=e.account AND day=date(e.occurred_at,'unixepoch') AND keys_known=0)
+            GROUP BY 1,2,3,4,5)
+            INSERT OR REPLACE INTO usage_daily SELECT account,day,surface,model,query_source,
+                SUM(requests),SUM(input),SUM(output),SUM(cache_read),SUM(cache_write),SUM(reasoning),SUM(cost_micros)
+            FROM (SELECT * FROM pending UNION ALL SELECT d.* FROM usage_daily d JOIN pending USING(account,day,surface,model,query_source))
+            GROUP BY account,day,surface,model,query_source", [usage_cutoff])
             .map_err(|_| "Cannot retain daily usage rollups.")?;
         for (sql, value) in [
             (
@@ -409,7 +467,7 @@ impl Store {
             .map_err(|_| "Cannot finish pruning usage history.".into())
     }
     pub fn open(path: &Path) -> Result<Self, String> {
-        let db = Connection::open(path).map_err(|_| "Cannot open local usage history.")?;
+        let mut db = Connection::open(path).map_err(|_| "Cannot open local usage history.")?;
         db.execute_batch("PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS latest (account TEXT PRIMARY KEY, observed_at INTEGER NOT NULL, snapshot TEXT NOT NULL);
@@ -419,10 +477,6 @@ impl Store {
             CREATE TABLE IF NOT EXISTS claude_requests (account TEXT NOT NULL, request TEXT NOT NULL, occurred_at INTEGER NOT NULL, tokens INTEGER NOT NULL, PRIMARY KEY(account,request));
             CREATE TABLE IF NOT EXISTS claude_account_usage (account TEXT PRIMARY KEY, quota TEXT NOT NULL, quota_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, plan TEXT);
             CREATE INDEX IF NOT EXISTS claude_requests_time ON claude_requests(account,occurred_at);
-            CREATE TABLE IF NOT EXISTS usage_events (account TEXT NOT NULL, source TEXT NOT NULL, key TEXT NOT NULL, occurred_at INTEGER NOT NULL,
-                surface TEXT NOT NULL, model TEXT, effort TEXT, speed TEXT, query_source TEXT, agent TEXT, input INTEGER NOT NULL, output INTEGER NOT NULL,
-                cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, reasoning INTEGER, cost_micros INTEGER, PRIMARY KEY(account,key));
-            CREATE INDEX IF NOT EXISTS usage_events_time ON usage_events(account,occurred_at);
             CREATE TABLE IF NOT EXISTS usage_daily (account TEXT NOT NULL, day TEXT NOT NULL, surface TEXT NOT NULL, model TEXT NOT NULL, query_source TEXT NOT NULL,
                 requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL,
                 reasoning INTEGER, cost_micros INTEGER, PRIMARY KEY(account,day,surface,model,query_source));
@@ -434,15 +488,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS ledger_marks (account TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL,
                 PRIMARY KEY(account,at,kind,source));")
             .map_err(|_| "Cannot initialize local usage history.")?;
-        // Which computer sent each shared row, so usage can be named by computer.
-        let has_origin: bool = db
-            .prepare("SELECT 1 FROM pragma_table_info('usage_events') WHERE name='origin'")
-            .and_then(|mut query| query.exists([]))
-            .map_err(|_| "Cannot initialize local usage history.")?;
-        if !has_origin {
-            db.execute("ALTER TABLE usage_events ADD COLUMN origin TEXT", [])
-                .map_err(|_| "Cannot initialize local usage history.")?;
-        }
+        initialize_usage_events(&mut db).map_err(|_| "Cannot initialize local usage history.")?;
+        migrate_pruned_days(&mut db).map_err(|_| "Cannot initialize retained daily usage.")?;
         // Plans seen before plan changes were recorded: the last 30 days of Codex observations.
         db.execute("INSERT OR IGNORE INTO ledger_marks SELECT account,observed_at,'plan','auto',plan FROM
             (SELECT account,observed_at,plan,LAG(plan) OVER (PARTITION BY account ORDER BY observed_at) AS previous FROM
@@ -486,6 +533,7 @@ impl Store {
                 .map_err(|_| "Cannot save allowance reading.")?;
         }
         if let Some(days) = snapshot["dailyUsage"].as_array() {
+            let claude = snapshot["provider"] == "claude";
             for day in days {
                 let date = day["date"]
                     .as_str()
@@ -494,8 +542,23 @@ impl Store {
                     .as_i64()
                     .filter(|value| *value >= 0)
                     .ok_or("Daily usage is missing its token total.")?;
-                transaction.execute("INSERT INTO daily_tokens VALUES (?1,?2,?3) ON CONFLICT(account,day) DO UPDATE SET tokens=excluded.tokens",
-                    params![account,date,tokens]).map_err(|_| "Cannot save daily token history.")?;
+                let written = transaction
+                    .execute(
+                        "INSERT INTO daily_tokens VALUES (?1,?2,?3)
+                         ON CONFLICT(account,day) DO UPDATE SET tokens=excluded.tokens WHERE NOT ?4
+                         AND NOT EXISTS (SELECT 1 FROM pruned_days WHERE ledger='tokens' AND account=?1 AND day=?2)",
+                        params![account, date, tokens, claude],
+                    )
+                    .map_err(|_| "Cannot save daily token history.")?;
+                if claude && written == 1 {
+                    // A snapshot-only day came without request keys. Preserve its total on replay.
+                    transaction
+                        .execute(
+                            "INSERT OR IGNORE INTO pruned_days VALUES ('tokens',?1,?2,0)",
+                            params![account, date],
+                        )
+                        .map_err(|_| "Cannot retain Claude snapshot history.")?;
+                }
             }
         }
         transaction
@@ -507,10 +570,11 @@ impl Store {
         &self,
         provider: &str,
     ) -> Result<std::collections::HashMap<String, crate::local_logs::Cursor>, String> {
+        let error = |_| "Cannot read local log positions.".to_string();
         let mut query = self
             .0
             .prepare("SELECT path,offset,state FROM log_cursors WHERE provider=?1")
-            .map_err(|_| "Cannot read local log positions.")?;
+            .map_err(error)?;
         let rows = query
             .query_map([provider], |row| {
                 Ok((
@@ -519,17 +583,22 @@ impl Store {
                     row.get::<_, String>(2)?,
                 ))
             })
-            .map_err(|_| "Cannot read local log positions.")?;
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
         let mut cursors = std::collections::HashMap::new();
-        for row in rows {
-            let (path, offset, state) = row.map_err(|_| "Cannot read local log positions.")?;
-            cursors.insert(
-                path,
-                crate::local_logs::Cursor {
-                    offset: offset.max(0) as u64,
-                    state: serde_json::from_str(&state).unwrap_or(Value::Null),
-                },
-            );
+        for (path, saved_offset, text) in rows {
+            let offset = saved_offset.max(0) as u64;
+            let mut state = serde_json::from_str(&text).unwrap_or(Value::Null);
+            if provider == "codex_rollout" {
+                state = crate::local_logs::codex_cursor_state(&state, offset);
+                let clean = state.to_string();
+                if clean != text {
+                    self.0.execute("UPDATE log_cursors SET state=?1 WHERE provider=?2 AND path=?3 AND offset=?4 AND state=?5",
+                        params![clean, provider, path, saved_offset, text]).map_err(|_| "Cannot normalize local log positions.")?;
+                }
+            }
+            cursors.insert(path, crate::local_logs::Cursor { offset, state });
         }
         Ok(cursors)
     }
@@ -557,8 +626,13 @@ impl Store {
                 .map_err(|_| "Cannot save allowance reading.")?;
         }
         for (path, cursor) in &scan.cursors {
+            let state = if provider == "codex_rollout" {
+                crate::local_logs::codex_cursor_state(&cursor.state, cursor.offset).to_string()
+            } else {
+                cursor.state.to_string()
+            };
             transaction.execute("INSERT INTO log_cursors VALUES (?1,?2,?3,?4) ON CONFLICT(provider,path) DO UPDATE SET offset=excluded.offset,state=excluded.state",
-                params![provider, path, cursor.offset as i64, cursor.state.to_string()]).map_err(|_| "Cannot save local log positions.")?;
+                params![provider, path, cursor.offset as i64, state]).map_err(|_| "Cannot save local log positions.")?;
         }
         transaction
             .commit()
@@ -791,34 +865,6 @@ impl Store {
         Ok(())
     }
 
-    /// Notes which computer sent each shared row and saves other computers' announcements.
-    pub fn relay_details(
-        &mut self,
-        origins: &[(String, String, String)],
-        devices: &[crate::usage_relay::Announced],
-    ) -> Result<(), String> {
-        let error = |_| "Cannot save shared computer details.".to_string();
-        let transaction = self.0.transaction().map_err(error)?;
-        for (account, key, origin) in origins {
-            transaction
-                .execute(
-                    "UPDATE usage_events SET origin=?3 WHERE account=?1 AND key=?2 AND source='relay'",
-                    params![account, key, origin],
-                )
-                .map_err(error)?;
-        }
-        for device in devices {
-            transaction
-                .execute(
-                    "INSERT INTO devices VALUES (?1,?2,?3,?4) ON CONFLICT(origin) DO UPDATE SET name=excluded.name,
-                    details=excluded.details,announced_at=excluded.announced_at WHERE excluded.announced_at>=devices.announced_at",
-                    params![device.origin, device.name, device.details, device.at],
-                )
-                .map_err(error)?;
-        }
-        transaction.commit().map_err(error)
-    }
-
     /// The computers and cloud sessions that report usage to this one: each other computer's
     /// name, setup and last usage, and when a cloud session last reported.
     pub fn computers(&self) -> Result<Value, String> {
@@ -904,7 +950,7 @@ impl Store {
             .0
             .prepare(&format!(
                 "SELECT occurred_at,{WHERE},COALESCE(model,''),COALESCE(query_source,''),input,output,cache_read,cache_write,cost_micros
-                {matching} ORDER BY occurred_at DESC,rowid DESC LIMIT {limit} OFFSET {offset}"
+                {matching} ORDER BY occurred_at DESC,upload_seq DESC LIMIT {limit} OFFSET {offset}"
             ))
             .map_err(error)?;
         let rows = query
@@ -1041,21 +1087,20 @@ impl Store {
         Ok(())
     }
 
-    /// Rows recorded on this computer that the usage channel has not received yet, with the
-    /// position to mark once they are sent. Rows received from the channel are never re-sent,
-    /// and rows older than the relay's 14-day retention are not sent at all.
+    /// The next upload page and the `upload_seq` to mark after the relay accepts it.
+    /// Received rows and rows older than the relay's 14-day retention are excluded.
     pub fn unshared_usage(
         &self,
         channel: &str,
-        limit: i64,
-    ) -> Result<(i64, Vec<crate::usage::Keyed>), String> {
+        device: &str,
+        limit: u16,
+    ) -> Result<(i64, Vec<Value>), String> {
         let after = self.relay_state(channel)?["pushed"].as_i64().unwrap_or(0);
         let error = |_| "Cannot read usage for the usage channel.".to_string();
-        let mut query = self.0.prepare("SELECT rowid,account,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros
-            FROM usage_events WHERE rowid>?1 AND source!='relay' AND occurred_at>=CAST(strftime('%s','now') AS INTEGER)-1209600 ORDER BY rowid LIMIT ?2").map_err(error)?;
-        let mut last = after;
-        let rows = query
-            .query_map(params![after, limit], |row| {
+        let mut query = self.0.prepare("SELECT upload_seq,account,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros
+            FROM usage_events WHERE upload_seq>?1 AND source!='relay' AND occurred_at>=CAST(strftime('%s','now') AS INTEGER)-1209600 ORDER BY upload_seq LIMIT ?2").map_err(error)?;
+        let candidates = query
+            .query_map(params![after, limit.min(200)], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -1077,21 +1122,29 @@ impl Store {
                     },
                 ))
             })
-            .map_err(error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(error)?
-            .into_iter()
-            .map(|(rowid, account, key, at, request)| {
-                last = last.max(rowid);
-                (account, key, at, request)
-            })
-            .collect();
+            .map_err(error)?;
+        let mut rows = Vec::new();
+        let mut bytes = br#"{"rows":[]}"#.len();
+        let mut last = after;
+        for candidate in candidates {
+            let (sequence, account, key, at, request) = candidate.map_err(error)?;
+            let row = crate::usage_relay::wire(&account, &key, at, &request, device);
+            bytes += row.to_string().len() + usize::from(!rows.is_empty());
+            if bytes > m_dash_sync::MAX_BODY {
+                if rows.is_empty() {
+                    return Err("One usage row exceeds the relay's upload size limit.".into());
+                }
+                break;
+            }
+            rows.push(row);
+            last = last.max(sequence);
+        }
         Ok((last, rows))
     }
 
     pub fn mark_shared(&mut self, channel: &str, through: i64) -> Result<(), String> {
         let mut state = self.relay_state(channel)?;
-        state["pushed"] = json!(through);
+        state["pushed"] = json!(through.max(state["pushed"].as_i64().unwrap_or(0)));
         Self::save_relay_state(&self.0, channel, &state)
     }
 
@@ -1099,11 +1152,13 @@ impl Store {
         Ok(self.relay_state(channel)?["seq"].as_i64().unwrap_or(0))
     }
 
-    /// Stores rows read from the usage channel together with the read position.
+    /// Commits the rows, sending computers and cursor of a downloaded page together.
     pub fn ingest_relay(
         &mut self,
         channel: &str,
         rows: &[(i64, crate::usage::Keyed)],
+        origins: &[(String, String, String)],
+        devices: &[crate::usage_relay::Announced],
         through: i64,
     ) -> Result<(), String> {
         let mut state = self.relay_state(channel)?;
@@ -1113,6 +1168,24 @@ impl Store {
             .map_err(|_| "Cannot begin saving shared usage.")?;
         for (_, (account, key, at, request)) in rows {
             insert_usage(&transaction, account, "relay", key, *at, request)?;
+        }
+        let error = |_| "Cannot save shared computer details.".to_string();
+        for (account, key, origin) in origins {
+            transaction
+                .execute(
+                    "UPDATE usage_events SET origin=?3 WHERE account=?1 AND key=?2 AND source='relay'",
+                    params![account, key, origin],
+                )
+                .map_err(error)?;
+        }
+        for device in devices {
+            transaction
+                .execute(
+                    "INSERT INTO devices VALUES (?1,?2,?3,?4) ON CONFLICT(origin) DO UPDATE SET name=excluded.name,
+                    details=excluded.details,announced_at=excluded.announced_at WHERE excluded.announced_at>=devices.announced_at",
+                    params![device.origin, device.name, device.details, device.at],
+                )
+                .map_err(error)?;
         }
         state["seq"] = json!(through);
         Self::save_relay_state(&transaction, channel, &state)?;
@@ -1147,6 +1220,94 @@ impl Store {
     }
 }
 
+fn migrate_pruned_days(db: &mut Connection) -> rusqlite::Result<()> {
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == 0 {
+        // Older archives have no keys to distinguish a late arrival from a replay.
+        tx.execute_batch("CREATE TABLE pruned_days (ledger TEXT NOT NULL, account TEXT NOT NULL, day TEXT NOT NULL,
+                keys_known INTEGER NOT NULL, PRIMARY KEY(ledger,account,day)) WITHOUT ROWID;
+            CREATE TABLE pruned_keys (digest BLOB PRIMARY KEY) WITHOUT ROWID;
+            INSERT INTO pruned_days SELECT DISTINCT 'usage',account,day,0 FROM usage_daily;
+            WITH telemetry AS (SELECT account,date(occurred_at,'unixepoch') AS day,COUNT(*) AS requests
+                FROM usage_events WHERE source='otel' GROUP BY 1,2),
+            live AS (SELECT r.account,date(r.occurred_at,'unixepoch') AS day,SUM(r.tokens) AS tokens,
+                    COUNT(*) AS requests,COUNT(e.key) AS matched
+                FROM claude_requests r LEFT JOIN usage_events e
+                    ON e.account=r.account AND e.key='claude:'||r.request AND e.source='otel'
+                    AND date(e.occurred_at,'unixepoch')=date(r.occurred_at,'unixepoch')
+                    AND e.input+e.output+e.cache_read+e.cache_write=r.tokens
+                GROUP BY 1,2)
+            INSERT INTO pruned_days SELECT 'tokens',d.account,d.day,0 FROM daily_tokens d LEFT JOIN live USING(account,day)
+                LEFT JOIN telemetry USING(account,day)
+                WHERE (d.account GLOB 'claude:*' OR live.tokens IS NOT NULL OR EXISTS (
+                    SELECT 1 FROM latest WHERE account=d.account AND json_extract(snapshot,'$.provider')='claude'))
+                AND (live.tokens IS NULL OR live.tokens<d.tokens OR live.matched!=live.requests
+                    OR live.matched!=telemetry.requests OR EXISTS (
+                    SELECT 1 FROM pruned_days WHERE ledger='usage' AND account=d.account AND day=d.day));
+            INSERT INTO daily_tokens SELECT account,date(occurred_at,'unixepoch'),SUM(tokens) FROM claude_requests GROUP BY 1,2
+                ON CONFLICT(account,day) DO UPDATE SET tokens=excluded.tokens WHERE NOT EXISTS (
+                    SELECT 1 FROM pruned_days WHERE ledger='tokens' AND account=excluded.account AND day=excluded.day);
+            PRAGMA user_version=1;")?;
+    }
+    tx.commit()
+}
+
+fn pruned_key(ledger: &str, account: &str, request: &str) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    for part in [ledger, account, request] {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.finalize().into()
+}
+
+fn remember_pruned_keys(
+    db: &rusqlite::Transaction<'_>,
+    tokens_before: i64,
+    usage_before: i64,
+) -> rusqlite::Result<()> {
+    let mut query = db.prepare("SELECT 'tokens',account,request,date(occurred_at,'unixepoch') FROM claude_requests WHERE occurred_at<?1
+        UNION ALL SELECT 'usage',account,key,date(occurred_at,'unixepoch') FROM usage_events WHERE occurred_at<?2")?;
+    let mut rows = query.query(params![tokens_before, usage_before])?;
+    let mut key = db.prepare("INSERT OR IGNORE INTO pruned_keys VALUES (?1)")?;
+    let mut day = db.prepare("INSERT OR IGNORE INTO pruned_days VALUES (?1,?2,?3,1)")?;
+    while let Some(row) = rows.next()? {
+        let ledger: String = row.get(0)?;
+        let account: String = row.get(1)?;
+        let request: String = row.get(2)?;
+        let date: String = row.get(3)?;
+        key.execute([pruned_key(&ledger, &account, &request)])?;
+        day.execute(params![ledger, account, date])?;
+    }
+    Ok(())
+}
+
+fn insert_claude_tokens(
+    db: &rusqlite::Transaction<'_>,
+    account: &str,
+    request: &str,
+    at: i64,
+    tokens: i64,
+) -> Result<(), String> {
+    let inserted = db
+        .execute(
+            "INSERT INTO claude_requests SELECT ?1,?2,?3,?4
+             WHERE NOT EXISTS (SELECT 1 FROM pruned_keys WHERE digest=?5)
+               AND NOT EXISTS (SELECT 1 FROM pruned_days WHERE ledger='tokens' AND account=?1 AND day=date(?3,'unixepoch') AND keys_known=0)
+             ON CONFLICT(account,request) DO NOTHING",
+            params![account, request, at, tokens, pruned_key("tokens", account, request)],
+        )
+        .map_err(|_| "Cannot save Claude token event.")?;
+    if inserted == 1 {
+        db.execute("INSERT INTO daily_tokens VALUES (?1,date(?2,'unixepoch'),?3)
+            ON CONFLICT(account,day) DO UPDATE SET tokens=(
+                SELECT SUM(amount) FROM (SELECT daily_tokens.tokens AS amount UNION ALL SELECT excluded.tokens))",
+            params![account, at, tokens]).map_err(|_| "Cannot save Claude daily tokens.")?;
+    }
+    Ok(())
+}
+
 /// Records one request once per account and key; a replay is ignored.
 /// Telemetry carries cost, effort and surface that a transcript lacks, so it replaces one.
 pub fn insert_usage(
@@ -1158,7 +1319,10 @@ pub fn insert_usage(
     request: &crate::usage::Request,
 ) -> Result<(), String> {
     db.execute(
-        "INSERT INTO usage_events (account,source,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        "INSERT INTO usage_events (account,source,key,occurred_at,surface,model,effort,speed,query_source,agent,input,output,cache_read,cache_write,reasoning,cost_micros)
+        SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16
+        WHERE NOT EXISTS (SELECT 1 FROM pruned_keys WHERE digest=?17)
+          AND NOT EXISTS (SELECT 1 FROM pruned_days WHERE ledger='usage' AND account=?1 AND day=date(?4,'unixepoch') AND keys_known=0)
         ON CONFLICT(account,key) DO UPDATE SET source=excluded.source,occurred_at=excluded.occurred_at,surface=excluded.surface,
         model=excluded.model,effort=excluded.effort,speed=excluded.speed,query_source=excluded.query_source,agent=excluded.agent,
         input=excluded.input,output=excluded.output,cache_read=excluded.cache_read,cache_write=excluded.cache_write,
@@ -1180,7 +1344,8 @@ pub fn insert_usage(
             request.cache_read,
             request.cache_write,
             request.reasoning,
-            request.cost_micros
+            request.cost_micros,
+            pruned_key("usage", account, key)
         ],
     )
     .map_err(|_| "Cannot save usage event.")?;
@@ -1190,6 +1355,41 @@ pub fn insert_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrading_usage_events_keeps_legacy_rows_and_their_later_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        Connection::open(&path).unwrap().execute_batch(
+            "CREATE TABLE usage_events (account TEXT NOT NULL, source TEXT NOT NULL, key TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+                surface TEXT NOT NULL, model TEXT, effort TEXT, speed TEXT, query_source TEXT, agent TEXT, input INTEGER NOT NULL, output INTEGER NOT NULL,
+                cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, reasoning INTEGER, cost_micros INTEGER, PRIMARY KEY(account,key));
+             INSERT INTO usage_events (account,source,key,occurred_at,surface,input,output,cache_read,cache_write,cost_micros)
+                VALUES ('one','relay','request',100,'cli',17,3,0,0,29);",
+        ).unwrap();
+        let saved = |store: &Store| -> (i64, i64, i64, Option<String>) {
+            store.0.query_row(
+                "SELECT input,output,cost_micros,origin FROM usage_events WHERE account='one' AND key='request'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap()
+        };
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(saved(&store), (17, 3, 29, None));
+        store
+            .ingest_relay(
+                "chan",
+                &[],
+                &[("one".into(), "request".into(), "sender".into())],
+                &[],
+                0,
+            )
+            .unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(saved(&reopened), (17, 3, 29, Some("sender".into())));
+    }
+
     #[test]
     fn native_account_switches_are_authoritative_even_with_identical_timestamps() {
         let directory = tempfile::tempdir().unwrap();
@@ -1517,6 +1717,247 @@ mod tests {
         assert_eq!(readings, 1);
     }
 
+    fn codex_token_count(total: Value) -> Value {
+        json!({"timestamp":"2026-10-30T00:00:10Z","type":"event_msg","payload":{
+            "type":"token_count","info":{"total_token_usage":total}
+        }})
+    }
+
+    #[test]
+    fn codex_sqlite_cursor_keeps_only_accounting_and_resume_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let header = json!({"type":"session_meta","payload":{"id":"s1","instructions":"private"}});
+        let context =
+            json!({"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"high"}});
+        let count = codex_token_count(
+            json!({"input_tokens":12,"cached_input_tokens":3,"output_tokens":4,
+            "reasoning_output_tokens":1,"total_tokens":17,"nested":{"text":["private"]}}),
+        );
+        let log = format!("{header}\n{context}\n{count}\n");
+        std::fs::write(&path, &log).unwrap();
+        let scan = crate::local_logs::scan(
+            crate::local_logs::Kind::Codex,
+            directory.path(),
+            &Default::default(),
+            crate::collector::now(),
+        );
+        store
+            .ingest_local_logs("codex_rollout", "codex:one", scan)
+            .unwrap();
+        let (offset, state): (i64, String) = store
+            .0
+            .query_row(
+                "SELECT offset,state FROM log_cursors WHERE provider='codex_rollout'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(offset, log.len() as i64);
+        assert_eq!(
+            serde_json::from_str::<Value>(&state).unwrap(),
+            json!({
+                "model":"gpt-5.6-sol","effort":"high","session_bytes":[0, header.to_string().len()+1],
+                "total":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":1}
+            })
+        );
+    }
+
+    #[test]
+    fn codex_partial_end_survives_sqlite_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let db_path = directory.path().join("usage.sqlite");
+        let header = json!({"type":"session_meta","payload":{"id":"s1"}});
+        let initial = format!("{header}\n{{\"type\":\"partial\"");
+        std::fs::write(&path, &initial).unwrap();
+        let now = crate::collector::now();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let scan = crate::local_logs::scan(
+                crate::local_logs::Kind::Codex,
+                directory.path(),
+                &Default::default(),
+                now,
+            );
+            store
+                .ingest_local_logs("codex_rollout", "codex:one", scan)
+                .unwrap();
+        }
+        let store = Store::open(&db_path).unwrap();
+        let cursors = store.log_cursors("codex_rollout").unwrap();
+        let key = if cfg!(windows) {
+            path.to_string_lossy().to_lowercase()
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        assert_eq!(cursors[&key].offset, (header.to_string().len() + 1) as u64);
+        assert_eq!(cursors[&key].state["partial_end"], json!(initial.len()));
+        let second = crate::local_logs::scan(
+            crate::local_logs::Kind::Codex,
+            directory.path(),
+            &cursors,
+            now,
+        );
+        assert!(second.cursors.is_empty());
+
+        let grown = format!("{initial}}}\n");
+        std::fs::write(&path, &grown).unwrap();
+        let third = crate::local_logs::scan(
+            crate::local_logs::Kind::Codex,
+            directory.path(),
+            &cursors,
+            now,
+        );
+        assert_eq!(third.cursors.len(), 1);
+        assert_eq!(third.cursors[0].1.offset, grown.len() as u64);
+        assert!(third.cursors[0].1.state["partial_end"].is_null());
+    }
+
+    #[test]
+    fn legacy_codex_cursor_is_cleaned_on_read_and_resumes_the_same_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let header = json!({"type":"session_meta","payload":{"id":"s1","instructions":"private"}});
+        let prefix = format!("{{}}\n{header}\npartial line:");
+        let legacy = json!({"session":"s1","skip":true,"model":{"prompt":"private"},"effort":"high",
+            "total":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":4,
+            "reasoning_output_tokens":{"text":"private"},"nested":{"text":"private"}},"extra":"private"});
+        store
+            .0
+            .execute(
+                "INSERT INTO log_cursors VALUES ('codex_rollout',?1,?2,?3)",
+                params![
+                    path.to_string_lossy(),
+                    prefix.len() as i64,
+                    legacy.to_string()
+                ],
+            )
+            .unwrap();
+        let cursors = store.log_cursors("codex_rollout").unwrap();
+        let cursor = &cursors[path.to_string_lossy().as_ref()];
+        assert_eq!(cursor.offset, prefix.len() as u64);
+        assert_eq!(
+            cursor.state,
+            json!({"skip":true,"effort":"high","session_bytes":[0,prefix.len()],
+            "total":{"input_tokens":12,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":0}})
+        );
+        let persisted: String = store
+            .0
+            .query_row("SELECT state FROM log_cursors", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&persisted).unwrap(),
+            cursor.state
+        );
+
+        let skipped = codex_token_count(json!({"input_tokens":50}));
+        let count = codex_token_count(
+            json!({"input_tokens":18,"cached_input_tokens":4,"output_tokens":6,
+            "reasoning_output_tokens":1}),
+        );
+        std::fs::write(&path, format!("{prefix}{skipped}\n{count}\n")).unwrap();
+        let scan = crate::local_logs::scan(
+            crate::local_logs::Kind::Codex,
+            directory.path(),
+            &cursors,
+            crate::collector::now(),
+        );
+        assert_eq!(scan.requests.len(), 1);
+        let (key, _, request) = &scan.requests[0];
+        assert_eq!(key, "codex:s1:29");
+        assert_eq!(
+            (
+                request.input,
+                request.cache_read,
+                request.output,
+                request.reasoning
+            ),
+            (5, 1, 2, Some(1))
+        );
+        assert_eq!(request.model, None);
+        assert_eq!(request.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn upload_pages_bound_complete_json_and_resume_at_the_last_sent_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let device = "d".repeat(43);
+        let now = crate::collector::now() as i64;
+        let request = crate::usage::Request {
+            surface: "cli".into(),
+            model: Some("燃\"\\\n".repeat(32)),
+            ..Default::default()
+        };
+        let keys: Vec<_> = (0..200).map(|i| format!("local-{i}")).collect();
+        let tx = store.0.transaction().unwrap();
+        for key in &keys {
+            insert_usage(&tx, "claude:other", "relay", key, now, &request).unwrap();
+            insert_usage(&tx, "claude:one", "otel", key, now, &request).unwrap();
+        }
+        tx.commit().unwrap();
+        let mut sent = Vec::new();
+        for _ in 0..5 {
+            let (through, rows) = store.unshared_usage("chan", &device, 200).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            assert!(serde_json::to_vec(&json!({ "rows": rows })).unwrap().len() <= 100_000);
+            assert!(rows.len() < 200);
+            assert_eq!(
+                store.unshared_usage("chan", &device, 200).unwrap(),
+                (through, rows.clone())
+            );
+            sent.extend(
+                rows.iter()
+                    .map(|row| row["key"].as_str().unwrap().to_owned()),
+            );
+            store.mark_shared("chan", through).unwrap();
+        }
+        assert_eq!(sent, keys);
+    }
+
+    #[test]
+    fn failed_download_rolls_back_rows_and_cursor_until_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("usage.sqlite")).unwrap();
+        let rows = [(
+            3,
+            (
+                "claude:one".into(),
+                "remote".into(),
+                123,
+                Default::default(),
+            ),
+        )];
+        let devices = [crate::usage_relay::Announced {
+            origin: "d".repeat(43),
+            name: "Remote".into(),
+            details: String::new(),
+            at: 124,
+        }];
+        let ingest = |store: &mut Store| store.ingest_relay("chan", &rows, &[], &devices, 7);
+        let count = |store: &Store| {
+            store
+                .0
+                .query_row("SELECT COUNT(*) FROM usage_events", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        store.0.execute_batch("CREATE TRIGGER reject_device BEFORE INSERT ON devices BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+        assert!(ingest(&mut store).is_err());
+        assert_eq!(store.relay_cursor("chan").unwrap(), 0);
+        assert_eq!(count(&store), 0);
+        store.0.execute_batch("DROP TRIGGER reject_device").unwrap();
+        ingest(&mut store).unwrap();
+        assert_eq!(store.relay_cursor("chan").unwrap(), 7);
+        assert_eq!(count(&store), 1);
+    }
+
     #[test]
     fn usage_channel_sends_local_rows_once_and_never_echoes_received_rows() {
         let directory = tempfile::tempdir().unwrap();
@@ -1539,7 +1980,7 @@ mod tests {
         for key in ["a", "b", "c"] {
             insert_usage(&store.0, "claude:one", "otel", key, now, &request).unwrap();
         }
-        let (through, rows) = store.unshared_usage("chan", 2).unwrap();
+        let (through, rows) = store.unshared_usage("chan", "here", 2).unwrap();
         assert_eq!(rows.len(), 2);
         store.mark_shared("chan", through).unwrap();
         let cloud = crate::usage::Request {
@@ -1550,17 +1991,152 @@ mod tests {
             .ingest_relay(
                 "chan",
                 &[(9, ("claude:one".into(), "cloud-1".into(), 120, cloud))],
+                &[],
+                &[],
                 9,
             )
             .unwrap();
         assert_eq!(store.relay_cursor("chan").unwrap(), 9);
-        let (_, rest) = store.unshared_usage("chan", 10).unwrap();
+        let (_, rest) = store.unshared_usage("chan", "here", 10).unwrap();
         assert_eq!(
-            rest.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
+            rest.iter()
+                .map(|row| row["key"].as_str().unwrap())
+                .collect::<Vec<_>>(),
             ["c"]
         );
-        assert_eq!(store.unshared_usage("other", 10).unwrap().1.len(), 3);
+        assert_eq!(
+            store.unshared_usage("other", "here", 10).unwrap().1.len(),
+            3
+        );
         assert_eq!(store.relay_cursor("other").unwrap(), 0);
+    }
+
+    #[test]
+    fn plan_backfill_keeps_recorded_history_and_fills_each_untracked_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plans.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        for (at, plan) in [(200, "pro"), (210, "plus")] {
+            store
+                .save(&json!({"accountId":"tracked","observedAt":at,"plan":plan}))
+                .unwrap();
+        }
+        for account in ["tracked", "legacy"] {
+            for (at, plan) in [(100, "plus"), (110, ""), (120, "plus"), (130, "team")] {
+                store
+                    .0
+                    .execute(
+                        "INSERT INTO observations VALUES (?1,?2,?3)",
+                        params![account, at, json!({"plan":plan}).to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+        drop(store);
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            for (account, at, text) in [
+                ("tracked", 210, "Plan changed from pro to plus"),
+                ("legacy", 130, "Plan changed from plus to team"),
+            ] {
+                assert_eq!(
+                    store.ledger_marks(account, 0).unwrap(),
+                    [json!({"at":at,"kind":"plan","source":"auto","text":text})],
+                    "{account}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn usage_channel_sends_new_rows_after_all_uploaded_events_are_pruned() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let request = crate::usage::Request {
+            surface: "cli".into(),
+            input: 1,
+            ..Default::default()
+        };
+        let now = crate::collector::now();
+        insert_usage(&store.0, "claude:one", "otel", "old", now as i64, &request).unwrap();
+        let (through, rows) = store.unshared_usage("chan", "here", 10).unwrap();
+        assert_eq!(rows[0]["key"], "old");
+        store.mark_shared("chan", through).unwrap();
+        let later = now + 91 * DAY;
+        store.prune(later).unwrap();
+        let raw_rows: i64 = store
+            .0
+            .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(raw_rows, 0);
+        drop(store);
+
+        let mut store = Store::open(&path).unwrap();
+        insert_usage(
+            &store.0,
+            "claude:one",
+            "otel",
+            "new",
+            later as i64,
+            &request,
+        )
+        .unwrap();
+        let (next, rows) = store.unshared_usage("chan", "here", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["key"], "new");
+        assert!(next > through);
+        store.mark_shared("chan", next).unwrap();
+        store.mark_shared("chan", through).unwrap();
+        assert!(store
+            .unshared_usage("chan", "here", 10)
+            .unwrap()
+            .1
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_usage_upload_positions_survive_migration_and_new_inserts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.sqlite");
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch(r#"CREATE TABLE usage_events (account TEXT NOT NULL, source TEXT NOT NULL, key TEXT NOT NULL, occurred_at INTEGER NOT NULL,
+            surface TEXT NOT NULL, model TEXT, effort TEXT, speed TEXT, query_source TEXT, agent TEXT, input INTEGER NOT NULL, output INTEGER NOT NULL,
+            cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, reasoning INTEGER, cost_micros INTEGER, origin TEXT, PRIMARY KEY(account,key));
+            CREATE INDEX usage_events_time ON usage_events(account,occurred_at);
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO settings VALUES ('usage-relay:chan','{"pushed":4,"seq":17}'),
+                ('usage-relay:other','{"pushed":15,"seq":23}'), ('usage-relay:invalid','{');"#).unwrap();
+        let now = crate::collector::now() as i64;
+        for (id, source, key, origin) in [
+            (3, "otel", "sent", None),
+            (7, "otel", "pending", None),
+            (8, "relay", "received", Some("other-computer")),
+        ] {
+            legacy.execute("INSERT INTO usage_events (rowid,account,source,key,occurred_at,surface,input,output,cache_read,cache_write,origin)
+                VALUES (?1,'claude:one',?2,?3,?4,'cli',1,0,0,0,?5)", params![id, source, key, now, origin]).unwrap();
+        }
+        drop(legacy);
+
+        let store = Store::open(&path).unwrap();
+        let (through, pending) = store.unshared_usage("chan", "here", 10).unwrap();
+        assert_eq!(through, 7);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["key"], "pending");
+        assert_eq!(store.relay_cursor("chan").unwrap(), 17);
+        assert_eq!(store.relay_cursor("other").unwrap(), 23);
+        assert_eq!(store.computers().unwrap()["others"][0]["lastUsage"], now);
+
+        let request = crate::usage::Request {
+            surface: "cli".into(),
+            input: 1,
+            ..Default::default()
+        };
+        insert_usage(&store.0, "claude:one", "otel", "new", now, &request).unwrap();
+        let (next, rows) = store.unshared_usage("other", "here", 10).unwrap();
+        assert!(next > 15);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["key"], "new");
     }
 
     #[test]
@@ -1750,6 +2326,8 @@ mod tests {
                         ),
                     ),
                 ],
+                &[("claude:one".into(), "mac".into(), "o".repeat(43))],
+                &[],
                 2,
             )
             .unwrap();
@@ -1772,14 +2350,17 @@ mod tests {
 
         // Once the sending computer announces itself, its usage carries its name.
         store
-            .relay_details(
-                &[("claude:one".into(), "mac".into(), "o".repeat(43))],
+            .ingest_relay(
+                "chan",
+                &[],
+                &[],
                 &[crate::usage_relay::Announced {
                     origin: "o".repeat(43),
                     name: "Studio Mac".into(),
                     details: "m-dash 0.6.0;logs=1;feed=1".into(),
                     at: now as i64,
                 }],
+                3,
             )
             .unwrap();
         let ledger = store
@@ -1866,18 +2447,374 @@ mod tests {
     }
 
     #[test]
-    fn pruning_keeps_claude_daily_totals_and_drops_only_old_detail() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&directory.path().join("prune.sqlite")).unwrap();
-        let event = |request: &str, at: &str, session: &str| {
-            json!({"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"claude-code"}}]},
+    fn raw_observations_and_allowance_readings_expire_at_their_own_cutoffs() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let at = 2 * DAY;
+        for time in [at - 1, at, at + 1] {
+            store
+                .save(&json!({"accountId":"one","observedAt":time,
+                "windows":[{"id":"weekly","usedPercent":25}]}))
+                .unwrap();
+        }
+        for (age, observations, readings) in [
+            (30 * DAY - 1, 3, 3),
+            (30 * DAY, 2, 3),
+            (30 * DAY + 1, 1, 3),
+            (400 * DAY, 0, 2),
+            (400 * DAY + 1, 0, 1),
+            (400 * DAY + 2, 0, 0),
+        ] {
+            store.prune(at + age).unwrap();
+            assert_eq!(
+                store.observation_count("one").unwrap(),
+                observations,
+                "age={age}"
+            );
+            let kept: i64 = store
+                .0
+                .query_row("SELECT COUNT(*) FROM limit_readings", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(kept, readings, "age={age}");
+        }
+        assert_eq!(
+            store.latest("codex").unwrap().unwrap()["observedAt"],
+            at + 1
+        );
+    }
+
+    #[test]
+    fn pruning_at_midday_rolls_up_only_complete_utc_days_once() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let midnight = 2 * DAY;
+        let tx = store.0.transaction().unwrap();
+        for (at, key, tokens) in [
+            (midnight - 1, "previous", 7),
+            (midnight, "start", 11),
+            (midnight + 1, "next", 13),
+        ] {
+            let at = at as i64;
+            insert_claude_tokens(&tx, "one", key, at, tokens).unwrap();
+            let request = crate::usage::Request {
+                surface: "cli".into(),
+                input: tokens,
+                ..Default::default()
+            };
+            insert_usage(&tx, "one", "otel", key, at, &request).unwrap();
+        }
+        tx.commit().unwrap();
+        for (days, expected) in [
+            (35, (24, 31, 31, 0)),
+            (90, (0, 31, 24, 7)),
+            (91, (0, 31, 0, 31)),
+        ] {
+            for _ in 0..2 {
+                store.prune(midnight + days * DAY + DAY / 2).unwrap();
+                let totals: (i64, i64, i64, i64) = store
+                    .0
+                    .query_row(
+                        "SELECT (SELECT COALESCE(SUM(tokens),0) FROM claude_requests),
+                            (SELECT COALESCE(SUM(tokens),0) FROM daily_tokens),
+                            (SELECT COALESCE(SUM(input),0) FROM usage_events),
+                            (SELECT COALESCE(SUM(input),0) FROM usage_daily)",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .unwrap();
+                assert_eq!(totals, expected, "days={days}");
+            }
+        }
+        let mut snapshot = json!({"accountId":"one"});
+        store.attach_history(&mut snapshot).unwrap();
+        assert_eq!(
+            snapshot["dailyUsage"],
+            json!([
+                {"date":"1970-01-02","tokens":7}, {"date":"1970-01-03","tokens":24}
+            ])
+        );
+    }
+
+    fn claude_request(request: &str, at: &str, session: &str) -> Value {
+        json!({"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"claude-code"}}]},
             "scopeLogs":[{"logRecords":[{"body":{"stringValue":"claude_code.api_request"},"attributes":[
             {"key":"user.account_uuid","value":{"stringValue":"one"}}, {"key":"organization.id","value":{"stringValue":"org"}},
             {"key":"session.id","value":{"stringValue":session}}, {"key":"request_id","value":{"stringValue":request}},
             {"key":"event.timestamp","value":{"stringValue":at}}, {"key":"input_tokens","value":{"intValue":"10"}},
             {"key":"output_tokens","value":{"intValue":"5"}},
             {"key":"cache_read_tokens","value":{"intValue":"0"}}, {"key":"cache_creation_tokens","value":{"intValue":"0"}}]}]}]}]})
+    }
+
+    #[test]
+    fn pruned_day_counts_replays_and_late_requests_once_across_restarts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let account = r#"claude:["one","org"]"#;
+        let event = |key| claude_request(key, "1970-01-01T00:16:40Z", "s");
+        for key in ["first", "second"] {
+            store.ingest_claude_telemetry(event(key), 1000).unwrap();
+        }
+        let assert_tokens = |store: &Store, tokens: i64| {
+            let snapshot = store.claude_snapshot().unwrap().unwrap();
+            assert_eq!(snapshot["observedTokens"], tokens);
+            assert_eq!(
+                snapshot["dailyUsage"],
+                json!([{"date":"1970-01-01","tokens":tokens}])
+            );
+            assert_eq!(snapshot["observedSince"], 0);
+            assert_eq!(
+                store.latest("claude").unwrap().unwrap()["dailyUsage"],
+                snapshot["dailyUsage"]
+            );
         };
+        store.prune(40 * DAY).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert_tokens(&store, 30);
+        store
+            .ingest_claude_telemetry(event("first"), 40 * DAY)
+            .unwrap();
+        assert_tokens(&store, 30);
+        store.prune(100 * DAY).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let redated = claude_request("first", "1970-01-02T00:16:40Z", "s");
+        store.ingest_claude_telemetry(redated, 100 * DAY).unwrap();
+        assert_tokens(&store, 30);
+        for (key, total) in [("second", 30), ("late", 45), ("late", 45)] {
+            store
+                .ingest_claude_telemetry(event(key), 100 * DAY)
+                .unwrap();
+            assert_tokens(&store, total);
+        }
+        for _ in 0..2 {
+            store.prune(100 * DAY).unwrap();
+        }
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_tokens(&store, 45);
+        let rollup: (i64, i64, i64) = store.0.query_row(
+            "SELECT requests,input,output FROM usage_daily WHERE account=?1 AND day='1970-01-01'",
+            [account], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(rollup, (3, 30, 15));
+    }
+
+    #[test]
+    fn failed_rollup_keeps_the_late_row_and_its_key_available_for_retry() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let account = "claude:fixture";
+        let mut request = crate::usage::Request {
+            surface: "cli".into(),
+            input: 5,
+            cost_micros: Some(7),
+            ..Default::default()
+        };
+        insert_usage(&store.0, account, "otel", "first", 100, &request).unwrap();
+        store.prune(100 * DAY).unwrap();
+        request.cost_micros = None;
+        insert_usage(
+            &store.0,
+            account,
+            "claude_transcript",
+            "late",
+            200,
+            &request,
+        )
+        .unwrap();
+        store
+            .0
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_rollup BEFORE INSERT ON usage_daily
+            BEGIN SELECT RAISE(ABORT,'fixture write failure'); END;",
+            )
+            .unwrap();
+        assert!(store.prune(100 * DAY).is_err());
+        assert_eq!(
+            store
+                .usage_list(account, &UsageFilter::default(), 200, false)
+                .unwrap()["total"],
+            1
+        );
+        store.0.execute_batch("DROP TRIGGER fail_rollup").unwrap();
+        request.reasoning = Some(2);
+        insert_usage(&store.0, account, "otel", "late", 200, &request).unwrap();
+        store.prune(100 * DAY).unwrap();
+        let rollup: (i64, i64, i64, i64) = store
+            .0
+            .query_row(
+                "SELECT requests,input,reasoning,cost_micros FROM usage_daily WHERE account=?1",
+                [account],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rollup, (2, 10, 2, 7));
+    }
+
+    fn legacy_usage_db(path: &Path) -> Connection {
+        let legacy = Connection::open(path).unwrap();
+        legacy.execute_batch("CREATE TABLE daily_tokens (account TEXT, day TEXT, tokens INTEGER, PRIMARY KEY(account,day));
+                CREATE TABLE claude_requests (account TEXT, request TEXT, occurred_at INTEGER, tokens INTEGER, PRIMARY KEY(account,request));
+                CREATE TABLE usage_daily (account TEXT, day TEXT, surface TEXT, model TEXT, query_source TEXT, requests INTEGER,
+                    input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, reasoning INTEGER, cost_micros INTEGER,
+                    PRIMARY KEY(account,day,surface,model,query_source));
+                CREATE TABLE usage_events (account TEXT, source TEXT, key TEXT, occurred_at INTEGER, surface TEXT, model TEXT,
+                    effort TEXT, speed TEXT, query_source TEXT, agent TEXT, input INTEGER, output INTEGER, cache_read INTEGER,
+                    cache_write INTEGER, reasoning INTEGER, cost_micros INTEGER, PRIMARY KEY(account,key));").unwrap();
+        legacy
+    }
+
+    #[test]
+    fn upgrading_preserves_unkeyed_archives_and_counts_live_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("old.sqlite");
+        let account = r#"claude:["one","org"]"#;
+        {
+            let legacy = legacy_usage_db(&path);
+            // One redelivered request has a revised count. The other day's request is still live.
+            legacy
+                .execute(
+                    "INSERT INTO daily_tokens VALUES (?1,'1970-01-01',30)",
+                    [account],
+                )
+                .unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO claude_requests VALUES (?1,'first',1000,45),(?1,'live',87400,15)",
+                    [account],
+                )
+                .unwrap();
+            legacy.execute("INSERT INTO usage_daily VALUES (?1,'1970-01-01','cli','','',2,20,10,0,0,NULL,12)", [account]).unwrap();
+            legacy.execute("INSERT INTO usage_events VALUES (?1,'otel','claude:first',1000,'cli',NULL,NULL,NULL,NULL,NULL,40,5,0,0,NULL,6)", [account]).unwrap();
+        }
+        let mut store = Store::open(&path).unwrap();
+        store
+            .save(
+                &json!({"provider":"claude","accountId":account,"observedAt":1000,
+            "dailyUsage":[{"date":"1970-01-01","tokens":15}]}),
+            )
+            .unwrap();
+        let replay = claude_request("second", "1970-01-01T00:16:40Z", "s");
+        store.ingest_claude_telemetry(replay, 100 * DAY).unwrap();
+        assert_eq!(
+            store.claude_snapshot().unwrap().unwrap()["observedTokens"],
+            45
+        );
+        let new = claude_request("new", "1970-01-02T00:16:40Z", "s");
+        store
+            .ingest_claude_telemetry(new.clone(), 100 * DAY)
+            .unwrap();
+        store.prune(100 * DAY).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let snapshot = store
+            .ingest_claude_telemetry(new, 100 * DAY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot["dailyUsage"],
+            json!([{"date":"1970-01-01","tokens":30},{"date":"1970-01-02","tokens":30}])
+        );
+        let rollup: (i64,i64) = store.0.query_row("SELECT requests,cost_micros FROM usage_daily WHERE account=?1 AND day='1970-01-01'",
+            [account], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(rollup, (2, 12));
+    }
+
+    #[test]
+    fn upgrading_preserves_a_partly_replayed_40_day_total_before_usage_rollup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        let account = r#"claude:["one","org"]"#;
+        let now = 40 * DAY;
+        {
+            let legacy = legacy_usage_db(&path);
+            legacy
+                .execute_batch(
+                    "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO settings VALUES ('claude-current-account','claude:other');",
+                )
+                .unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO daily_tokens VALUES (?1,'1970-01-01',30)",
+                    [account],
+                )
+                .unwrap();
+            for key in ["claude:first", "claude:second"] {
+                legacy.execute("INSERT INTO usage_events VALUES (?1,'otel',?2,1000,'cli',NULL,NULL,NULL,NULL,NULL,10,5,0,0,NULL,NULL)",
+                    params![account, key]).unwrap();
+            }
+            // After the 35-day prune, only the revised delivery has a live token row.
+            legacy
+                .execute(
+                    "INSERT INTO claude_requests VALUES (?1,'first',1000,45)",
+                    [account],
+                )
+                .unwrap();
+        }
+        let assert_saved = |store: &Store| {
+            assert_eq!(
+                store.claude_snapshot().unwrap().unwrap()["accountId"],
+                "claude:other"
+            );
+            let mut snapshot = json!({"accountId":account});
+            store.attach_history(&mut snapshot).unwrap();
+            assert_eq!(
+                snapshot["dailyUsage"],
+                json!([{"date":"1970-01-01","tokens":30}])
+            );
+        };
+        let mut store = Store::open(&path).unwrap();
+        assert_saved(&store);
+        for key in ["first", "second"] {
+            store
+                .ingest_claude_telemetry(claude_request(key, "1970-01-01T00:16:40Z", "s"), now)
+                .unwrap();
+            assert_saved(&store);
+        }
+        store.prune(now).unwrap();
+        drop(store);
+        assert_saved(&Store::open(&path).unwrap());
+    }
+
+    #[test]
+    fn upgrading_rebuilds_a_saved_total_only_when_the_request_keys_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        {
+            let legacy = legacy_usage_db(&path);
+            for (account, second_key) in [
+                ("claude:complete", "claude:new"),
+                ("claude:partial", "claude:missing"),
+            ] {
+                legacy
+                    .execute(
+                        "INSERT INTO daily_tokens VALUES (?1,'1970-01-01',15)",
+                        [account],
+                    )
+                    .unwrap();
+                legacy.execute("INSERT INTO claude_requests VALUES (?1,'first',1000,15),(?1,'new',1001,15)", [account]).unwrap();
+                for key in ["claude:first", second_key] {
+                    legacy.execute("INSERT INTO usage_events VALUES (?1,'otel',?2,1000,'cli',NULL,NULL,NULL,NULL,NULL,10,5,0,0,NULL,NULL)",
+                        params![account, key]).unwrap();
+                }
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        for (account, total) in [("claude:complete", 30), ("claude:partial", 15)] {
+            let mut snapshot = json!({"accountId":account});
+            store.attach_history(&mut snapshot).unwrap();
+            assert_eq!(
+                snapshot["dailyUsage"],
+                json!([{"date":"1970-01-01","tokens":total}]),
+                "{account}"
+            );
+        }
+    }
+
+    #[test]
+    fn pruning_keeps_claude_daily_totals_and_drops_only_old_detail() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("prune.sqlite")).unwrap();
+        let event = claude_request;
         let recent = 40 * DAY + 100;
         store
             .ingest_claude_telemetry(event("old", "1970-01-01T00:16:40Z", "old-session"), 1000)

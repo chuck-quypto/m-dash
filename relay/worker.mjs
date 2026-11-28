@@ -1,7 +1,8 @@
 const token = value => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 const reply = (status, body = {}) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options':'nosniff' } });
 const digest = async value => btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
-async function body(request, limit=100000) {
+const MAX_BODY_BYTES=100000;
+async function body(request, limit=MAX_BODY_BYTES) {
  if (!request.headers.get('Content-Type')?.startsWith('application/json')) throw 400;
  const reader=request.body?.getReader(); if (!reader) throw 400;
  const chunks=[];let size=0;
@@ -13,7 +14,8 @@ function fields(value, keys) {if(!value || Array.isArray(value) || typeof value!
 // Usage channels carry per-request accounting rows (never content) between a user's own computers
 // and from Claude Code cloud sessions, whose OTLP exporter cannot reach a loopback receiver.
 const USAGE_KEYS=['provider','account','key','at','surface','model','effort','speed','querySource','agent','input','output','cacheRead','cacheWrite','reasoning','costMicros','origin'];
-const label=(value,max=128)=>value===null || (typeof value==='string' && value.length>0 && value.length<=max);
+const text=(value,max=128)=>typeof value==='string' && value.length>0 && value.length<=max && value.isWellFormed()?value:null;
+const label=(value,max)=>value===null || text(value,max)!==null;
 const amount=value=>Number.isSafeInteger(value) && value>=0;
 function usageRow(row) {
  fields(row,[...USAGE_KEYS]);
@@ -26,7 +28,6 @@ function usageRow(row) {
 }
 const attribute=(attrs,name)=>{const value=(Array.isArray(attrs)?attrs:[]).find(a=>a?.key===name)?.value;return value?.stringValue ?? value?.intValue ?? value?.doubleValue ?? null;};
 const count=value=>{const n=typeof value==='string'?Number(value):value;return Number.isSafeInteger(n) && n>=0?n:null;};
-const text=(value,max=128)=>typeof value==='string' && value.length>0 && value.length<=max?value:null;
 // Keeps only api_request accounting attributes; prompts, tool data and identity fields such as email are dropped here.
 function otlpRows(payload, now) {
  const rows=[];
@@ -48,7 +49,22 @@ function otlpRows(payload, now) {
 }
 async function storeRows(env, channel, rows, now) {
  if(!rows.length)return;
- await env.DB.batch(rows.map(row=>env.DB.prepare('INSERT OR IGNORE INTO usage_rows (channel,account,key,received,row) SELECT ?,?,?,?,? WHERE (SELECT COUNT(*) FROM usage_rows WHERE channel=?)<200000').bind(channel,row.account,row.key,now,JSON.stringify(row),channel)));
+ const batch=JSON.stringify(rows);
+ const unseen=`SELECT item.key AS pos, item.value AS row, item.value->>'$.account' AS account, item.value->>'$.key' AS row_key
+  FROM json_each(?) AS item WHERE NOT EXISTS (
+   SELECT 1 FROM usage_rows AS saved WHERE saved.channel=? AND saved.account=item.value->>'$.account' AND saved.key=item.value->>'$.key'
+  )`;
+ // The probe distinguishes an idempotent retry from a rejected batch in the same D1 transaction.
+ const [needed,inserted]=await env.DB.batch([
+  env.DB.prepare(`SELECT 1 FROM (${unseen}) LIMIT 1`).bind(batch,channel),
+  env.DB.prepare(`WITH fresh AS MATERIALIZED (${unseen})
+   INSERT INTO usage_rows (channel,account,key,received,row)
+   SELECT ?,account,row_key,?,row FROM fresh
+   WHERE (SELECT COUNT(*) FROM usage_rows WHERE channel=?)
+       + (SELECT COUNT(*) FROM (SELECT DISTINCT account,row_key FROM fresh)) <= 200000
+   ORDER BY pos ON CONFLICT(channel,account,key) DO NOTHING`).bind(batch,channel,channel,now,channel)
+ ]);
+ if(needed.results.length && !inserted.meta.changes)throw 409;
 }
 async function usage(request, env, url, now) {
  const logs=/^\/v1\/usage\/([A-Za-z0-9_-]{43})\/([A-Za-z0-9_-]{43})\/logs$/.exec(url.pathname);
@@ -83,7 +99,20 @@ async function usage(request, env, url, now) {
  if(authHash!==channel.read_hash)return reply(401);
  if(request.method==='GET' && after!==undefined) {
   const {results}=await env.DB.prepare('SELECT seq,row FROM usage_rows WHERE channel=? AND seq>? ORDER BY seq LIMIT 200').bind(id,Number(after)).all();
-  return reply(200,{rows:results.map(r=>({seq:r.seq,...JSON.parse(r.row)}))});
+  const rows=[], encoder=new TextEncoder();
+  let bytes='{"rows":[]}'.length;
+  for(const stored of results) {
+   // Keep rows stored before UTF-16 validation readable by the desktop.
+   const row={seq:stored.seq,...JSON.parse(stored.row,(_,value)=>typeof value==='string'?value.toWellFormed():value)};
+   const size=encoder.encode(JSON.stringify(row)).byteLength+(rows.length ? 1 : 0);
+   if(bytes+size>MAX_BODY_BYTES) {
+    if(!rows.length)throw 413;
+    break;
+   }
+   rows.push(row);
+   bytes+=size;
+  }
+  return reply(200,{rows});
  }
  if(request.method==='DELETE' && !rows && after===undefined) {
   await env.DB.batch([env.DB.prepare('DELETE FROM usage_rows WHERE channel=?').bind(id),env.DB.prepare('DELETE FROM usage_channels WHERE id=?').bind(id)]);

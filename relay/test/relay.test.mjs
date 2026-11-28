@@ -132,3 +132,93 @@ test('usage channels keep only accounting rows and separate ingest from reads',a
  assert.equal((await request(root,'DELETE',undefined,token('r'))).status,200);
  assert.equal((await request(root+'/rows/0','GET',undefined,token('r'))).status,401);
 });
+
+async function usageChannel(t) {
+ const {request,mf}=await fixture(t);
+ const id=token('u'), root='/v1/usage/'+id, path=root+'/rows';
+ assert.equal((await request('/v1/usage','POST',{id,ingestHash:digest(token('w')),readHash:digest(token('r'))},token('e'))).status,201);
+ return {id,mf,post:rows=>request(path,'POST',{rows},token('w')),get:after=>request(path+'/'+after),
+  postLogs:logs=>request(root+'/'+token('w')+'/logs','POST',logs)};
+}
+
+test('usage ingest rejects unpaired surrogates and preserves valid pairs',async t=>{
+ const {post,get}=await usageChannel(t);
+ const row={...usageRow(token('d')),model:'model-\uD83E\uDD80'};
+ assert.equal((await post([{...row,model:'model-\uD800'}])).status,400);
+ assert.equal((await post([{...row,key:'claude:\uDFFF'}])).status,400);
+ assert.deepEqual(await (await get(0)).json(),{rows:[]});
+ assert.equal((await post([row])).status,200);
+ const {rows}=await (await get(0)).json();
+ assert.deepEqual(rows.map(({seq,...stored})=>stored),[row]);
+});
+
+test('cloud log ingest drops unpaired surrogates from accounting rows',async t=>{
+ const {postLogs,get}=await usageChannel(t);
+ const now=new Date().toISOString(),attr=(key,value)=>({key,value:{stringValue:value}});
+ const record=(request,model)=>({attributes:[attr('event.name','api_request'),attr('user.account_uuid','a'),
+  attr('organization.id','o'),attr('request_id',request),attr('event.timestamp',now),attr('model',model),
+  attr('input_tokens','1'),attr('output_tokens','2'),attr('cache_read_tokens','0'),attr('cache_creation_tokens','0')]});
+ const logs={resourceLogs:[{resource:{attributes:[attr('service.name','claude-code')]},scopeLogs:[{logRecords:[
+  record('malformed-\uD800','model'),record('valid','model-\uDFFF'),record('pair','model-\uD83E\uDD80')
+ ]}]}]};
+ assert.equal((await postLogs(logs)).status,200);
+ const {rows}=await (await get(0)).json();
+ assert.deepEqual(rows.map(({key,model,input})=>[key,model,input]),[
+  ['claude:valid',null,1],['claude:pair','model-\uD83E\uDD80',1]
+ ]);
+});
+
+test('usage paging keeps existing rows with malformed labels readable',async t=>{
+ const {id,mf,get}=await usageChannel(t);
+ const db=await mf.getD1Database('DB'), row={...usageRow(token('d')),model:'model-\uD800'};
+ await db.prepare('INSERT INTO usage_rows(channel,account,key,received,row) VALUES (?,?,?,?,?)')
+  .bind(id,row.account,row.key,1000,JSON.stringify(row)).run();
+ const {rows}=await (await get(0)).json();
+ assert.deepEqual(rows,[{...row,model:'model-\uFFFD',seq:1}]);
+ assert.deepEqual(await (await get(rows[0].seq)).json(),{rows:[]});
+});
+
+test('usage pages fit the UTF-8 body limit and resume at the last row delivered',async t=>{
+ const {post,get}=await usageChannel(t);
+ const rows=Array.from({length:120},(_,i)=>({
+  ...usageRow(token('d'),'row-'+i), account:'測'.repeat(300), model:'"\\'.repeat(64)
+ }));
+ // The first 69 sequenced rows take 100001 bytes. Starting at row two, 69 take exactly 100000.
+ rows[68].model=rows[68].model.slice(20);
+ rows[69].key='r69';
+ assert.equal((await post(rows)).status,413);
+ assert.equal((await post(Array(201).fill(usageRow(token('d'))))).status,400);
+ for(let i=0;i<rows.length;i+=40)assert.equal((await post(rows.slice(i,i+40))).status,200);
+ assert.equal((await (await get(1)).arrayBuffer()).byteLength,100000);
+ const received=[];
+ while(received.length<rows.length) {
+  const response=await get(received.at(-1)?.seq ?? 0);
+  assert.equal(response.status,200);
+  const bytes=await response.arrayBuffer();
+  assert.ok(bytes.byteLength<=100000,`page was ${bytes.byteLength} bytes`);
+  const page=JSON.parse(new TextDecoder().decode(bytes)).rows;
+  assert.ok(page.length>0 && page.length<=200);
+  received.push(...page);
+ }
+ assert.deepEqual(received.map(({seq,...row})=>row),rows);
+ assert.deepEqual(await (await get(received.at(-1).seq)).json(),{rows:[]});
+});
+
+test('usage capacity admits complete batches and allows duplicate retries even when full',async t=>{
+ const {id,mf,post,get}=await usageChannel(t);
+ const db=await mf.getD1Database('DB');
+ await db.prepare(`WITH RECURSIVE seed(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seed WHERE n<199998)
+  INSERT INTO usage_rows(channel,account,key,received,row) SELECT ?,'seed',CAST(n AS TEXT),0,'{}' FROM seed`).bind(id).run();
+ const existing=usageRow(token('d')), b={...existing,account:'b'}, c={...existing,account:'c'};
+ assert.equal((await post([existing])).status,200);
+ const {rows:[{seq}]}=await (await get(199998)).json();
+ assert.equal((await post([existing,b,c])).status,409);
+ assert.deepEqual(await (await get(seq)).json(),{rows:[]});
+ const contenders=[b,c];
+ const statuses=await Promise.all(contenders.map(async row=>(await post([existing,row,{...row,input:999}])).status));
+ assert.deepEqual([...statuses].sort(),[200,409]);
+ const winner=contenders[statuses.indexOf(200)];
+ const {rows}=await (await get(seq)).json();
+ assert.deepEqual(rows.map(({seq,...stored})=>stored),[winner]);
+ assert.equal((await post([winner,existing,winner])).status,200);
+});

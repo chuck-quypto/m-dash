@@ -265,6 +265,45 @@ mod tests {
         assert!(open(&offer, &changed, None, 1002).is_err());
         assert!(Offer::decode(&pair.code().unwrap(), 1900).is_err());
     }
+
+    #[tokio::test]
+    async fn only_usage_row_posts_treat_conflict_as_capacity() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for status in ["409 Conflict", "409 Conflict", "401 Unauthorized", "200 OK"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                )
+                .unwrap();
+            }
+        });
+        let rows_url = format!("{url}/v1/usage/test/rows");
+        let post = || post_rows(&rows_url, "test", Vec::new());
+        assert_eq!(post().await, Ok(false));
+        assert_eq!(
+            call(
+                &format!("{url}/v1/devices/test/snapshot"),
+                reqwest::Method::PUT,
+                "test",
+                None
+            )
+            .await
+            .unwrap_err(),
+            "Pairing or snapshot conflict; refresh and retry."
+        );
+        assert_eq!(
+            post().await.unwrap_err(),
+            "Pairing revoked or relay authorization rejected."
+        );
+        assert_eq!(post().await, Ok(true));
+        server.join().unwrap();
+    }
 }
 
 /// Fixed relay operations; no arbitrary URL/headers are exposed to renderers.
@@ -301,6 +340,15 @@ async fn call(
     token: &str,
     body: Option<Value>,
 ) -> Result<Value> {
+    read_response(send(url, method, token, body).await?).await
+}
+
+async fn send(
+    url: &str,
+    method: reqwest::Method,
+    token: &str,
+    body: Option<Value>,
+) -> Result<reqwest::Response> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let client = if let Some(client) = CLIENT.get() {
         client.clone()
@@ -317,10 +365,12 @@ async fn call(
     if let Some(body) = body {
         req = req.json(&body)
     }
-    let mut response = req
-        .send()
+    req.send()
         .await
-        .map_err(|_| "Relay unavailable. Last saved readings retained.")?;
+        .map_err(|_| "Relay unavailable. Last saved readings retained.".into())
+}
+
+async fn read_response(mut response: reqwest::Response) -> Result<Value> {
     if !response.status().is_success() {
         return Err(match response.status().as_u16() {
             400 => "Relay rejected sync data. Check app/relay compatibility and the system clock; saved readings were retained.",
@@ -359,6 +409,32 @@ pub async fn usage_request(
         return Err(INVALID.into());
     }
     call(&format!("{}{path}", endpoint(origin)?), method, token, body).await
+}
+
+/// Returns false when the channel has no room for the complete batch.
+pub async fn post_usage_rows(
+    origin: &str,
+    id: &str,
+    token: &str,
+    rows: Vec<Value>,
+) -> Result<bool> {
+    let url = format!("{}/v1/usage/{id}/rows", endpoint(origin)?);
+    post_rows(&url, token, rows).await
+}
+
+async fn post_rows(url: &str, token: &str, rows: Vec<Value>) -> Result<bool> {
+    let response = send(
+        url,
+        reqwest::Method::POST,
+        token,
+        Some(serde_json::json!({ "rows": rows })),
+    )
+    .await?;
+    if response.status() == reqwest::StatusCode::CONFLICT {
+        return Ok(false);
+    }
+    read_response(response).await?;
+    Ok(true)
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -423,11 +499,99 @@ pub use reqwest::Method;
 mod admission_tests {
     use super::*;
     use serde_json::json;
+
     #[test]
     fn authenticated_but_invalid_or_secret_bearing_snapshots_are_not_admitted() {
         let p = Pair::new("https://relay.example.workers.dev", 1000).unwrap();
         let bad = json!({"sourceId":p.offer.id,"sequence":1,"publishedAt":1001,"providers":[],"secret":"no"});
         assert!(seal(&p.offer, &bad).is_err());
+    }
+
+    fn paired_v2_snapshot() -> (Phone, Value) {
+        let pair = Pair::new("https://relay.example.workers.dev", 1000).unwrap();
+        let phone = Phone::pair(&pair.code().unwrap(), 1001).unwrap();
+        let snapshot = json!({
+            "version":2,"sourceId":phone.offer.id,"sourceName":"Desktop","sequence":2,"publishedAt":1001,
+            "providers":[{"id":"codex","accountId":"synthetic","observedAt":1000,"status":"ok",
+                "windows":[{"id":"usage","label":"Usage","durationMinutes":null,"remainingPercent":75,"resetsAt":null}],
+                "balanceUsd":null,"dailyTokens":[]}]
+        });
+        (phone, snapshot)
+    }
+
+    // Encrypt directly so sender-side schema checks cannot reject the test case first.
+    fn authenticated_envelope(offer: &Offer, snapshot: &Value, sequence: u64) -> Envelope {
+        let mut nonce = [0; 12];
+        OsRng.fill_bytes(&mut nonce);
+        let mut envelope = Envelope {
+            version: 1,
+            id: offer.id.clone(),
+            sequence,
+            published_at: snapshot["publishedAt"].as_u64().unwrap(),
+            nonce: B64.encode(nonce),
+            ciphertext: String::new(),
+        };
+        let key = B64.decode(&offer.key).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        envelope.ciphertext = B64.encode(
+            cipher
+                .encrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &serde_json::to_vec(snapshot).unwrap(),
+                        aad: &aad(&envelope),
+                    },
+                )
+                .unwrap(),
+        );
+        envelope
+    }
+
+    #[test]
+    fn receiver_rejects_surplus_fields_in_authenticated_v2_snapshots() {
+        let (mut phone, snapshot) = paired_v2_snapshot();
+        let envelope = authenticated_envelope(&phone.offer, &snapshot, 2);
+        assert_eq!(open(&phone.offer, &envelope, None, 1002).unwrap(), snapshot);
+        phone.last = Some(envelope.clone());
+        assert_eq!(phone.cached(1002).unwrap(), Some(snapshot.clone()));
+
+        let mut wire = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Envelope>(wire.clone()).unwrap(),
+            envelope
+        );
+        wire["surplus"] = json!(true);
+        assert!(serde_json::from_value::<Envelope>(wire).is_err());
+
+        let mut root_extra = snapshot.clone();
+        root_extra["surplus"] = json!({"message":"synthetic"});
+        let mut window_extra = snapshot;
+        window_extra["providers"][0]["windows"][0]["surplus"] = json!("synthetic");
+        for bad in [root_extra, window_extra] {
+            let envelope = authenticated_envelope(&phone.offer, &bad, 2);
+            assert_eq!(
+                open(&phone.offer, &envelope, None, 1002).unwrap_err(),
+                INVALID
+            );
+            phone.last = Some(envelope);
+            assert_eq!(phone.cached(1002).unwrap_err(), INVALID);
+        }
+    }
+
+    #[test]
+    fn receiver_rejects_an_authenticated_v2_snapshot_with_a_mismatched_sequence() {
+        let (mut phone, mut snapshot) = paired_v2_snapshot();
+        snapshot["sequence"] = json!(1);
+        let matching = authenticated_envelope(&phone.offer, &snapshot, 1);
+        assert_eq!(open(&phone.offer, &matching, None, 1002).unwrap(), snapshot);
+
+        let mismatched = authenticated_envelope(&phone.offer, &snapshot, 2);
+        assert_eq!(
+            open(&phone.offer, &mismatched, None, 1002).unwrap_err(),
+            INVALID
+        );
+        phone.last = Some(mismatched);
+        assert_eq!(phone.cached(1002).unwrap_err(), INVALID);
     }
 }
 
