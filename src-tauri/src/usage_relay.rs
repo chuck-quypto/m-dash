@@ -506,6 +506,17 @@ where
 mod tests {
     use super::*;
 
+    fn node_bin() -> std::path::PathBuf {
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(node_name))
+                    .find(|candidate| candidate.is_file())
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from(node_name))
+    }
+
     // Run the Node program from the generated here-document on Windows as well as Unix.
     fn run_setup(
         script: &str,
@@ -515,15 +526,7 @@ mod tests {
         let (_, command) = script.split_once("MDASH_ENDPOINT='").unwrap();
         let (encoded, program) = command.split_once("' node <<'MDASH_SETUP'\n").unwrap();
         let program = program.strip_suffix("\nMDASH_SETUP\n").unwrap();
-        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
-        let node_bin = std::env::var_os("PATH")
-            .and_then(|path| {
-                std::env::split_paths(&path)
-                    .map(|dir| dir.join(node_name))
-                    .find(|candidate| candidate.is_file())
-            })
-            .unwrap_or_else(|| std::path::PathBuf::from(node_name));
-        let mut node = std::process::Command::new(node_bin);
+        let mut node = std::process::Command::new(node_bin());
         node.env_clear()
             .env("HOME", home)
             .env("MDASH_ENDPOINT", encoded);
@@ -778,7 +781,7 @@ mod tests {
             );
 
             for (generic, logs) in [(false, false), (true, false), (false, true), (true, true)] {
-                let mut session = tokio::process::Command::new("node");
+                let mut session = tokio::process::Command::new(node_bin());
                 session.env_clear().env("HOME", home.path());
                 #[cfg(windows)]
                 session.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
