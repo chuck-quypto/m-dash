@@ -145,9 +145,10 @@ test('deleting shared rows requires confirmation of the specific channel with Ca
     const dialog = document.querySelector('dialog[open]');
     assert.ok(dialog);
     assert.equal(document.getElementById(dialog.getAttribute('aria-labelledby')).textContent, 'Delete channel and shared rows?');
-    const description = document.getElementById(dialog.getAttribute('aria-describedby')).textContent;
+    const descriptionEl = document.getElementById(dialog.getAttribute('aria-describedby'));
+    const description = descriptionEl.textContent;
     assert.match(description, new RegExp(id));
-    assert.ok(description.includes(endpoint));
+    assert.deepEqual(Array.from(descriptionEl.querySelectorAll('strong'), el => el.textContent), [id, endpoint]);
     assert.doesNotMatch(dialog.textContent, /synthetic-(read|write|setup)|mdash-usage1:/);
     assert.equal(document.activeElement.textContent, 'Cancel');
     tick();

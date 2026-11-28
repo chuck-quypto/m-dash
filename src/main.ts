@@ -272,7 +272,7 @@ function history() {
   if (!sources.includes(historyProvider)) historyProvider = sources[0];
   const snapshot = historyProvider === 'codex' ? state.snapshot : historyProvider === 'claude' ? state.claude : historyProvider === 'antigravity' ? state.antigravity : state.openrouter;
   const description = historyProvider === 'codex' ? 'Provider-reported account day buckets, retained across refreshes. Provider day labels are preserved; the newest day can be incomplete or delayed.' : historyProvider === 'claude' ? 'Local Claude Code tokens collected while this dashboard was running, grouped by UTC day. Includes input, output, cache reads and cache creation. This is observed history, not account lifetime usage.' : historyProvider === 'antigravity' ? 'Local Antigravity tokens read from CLI, App, and IDE session transcripts on this device, grouped by UTC day. Includes fresh input, output, and cache reads. Enable Local session logs in Settings to collect them.' : 'Account token reports for completed UTC days. Today is unavailable. Imports update the previous 30 days and retain older days. Input plus output; cache and reasoning subsets are not counted again. Replacing the management key starts separate history.';
-  return `<section class="panel"><div class="section-heading"><h2>Daily token history</h2><select id="history-provider" aria-label="Token history source">${sources.map(value => `<option value="${value}" ${historyProvider === value ? 'selected' : ''}>${providerNames[value]}${value === 'claude' || value === 'antigravity' ? ' · local observed' : value === 'openrouter' ? ' · imported' : ' account'}</option>`).join('')}</select></div><p class="support">${description}</p>${snapshot?.dailyUsage.length ? `<table><caption class="sr-only">${historyProvider} daily token totals</caption><thead><tr><th scope="col">${historyProvider === 'codex' ? 'Provider day' : 'UTC day'}</th><th scope="col" class="numeric">Tokens</th></tr></thead><tbody>${[...snapshot.dailyUsage].reverse().map(day => `<tr><td>${escape(day.date)}</td><td class="numeric">${metric(day.tokens)}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">No daily history has been reported.</p>'}</section>`;
+  return `<section class="panel"><div class="section-heading"><h2>Daily token history</h2><select id="history-provider" aria-label="Token history source">${sources.map(value => `<option value="${value}" ${historyProvider === value ? 'selected' : ''}>${providerNames[value]}${value === 'claude' || value === 'antigravity' ? ' · local observed' : value === 'openrouter' ? ' · imported' : ' account'}</option>`).join('')}</select></div><p class="support">${description}</p>${snapshot?.dailyUsage.length ? `<table><caption class="sr-only">${escape(historyProvider)} daily token totals</caption><thead><tr><th scope="col">${historyProvider === 'codex' ? 'Provider day' : 'UTC day'}</th><th scope="col" class="numeric">Tokens</th></tr></thead><tbody>${[...snapshot.dailyUsage].reverse().map(day => `<tr><td>${escape(day.date)}</td><td class="numeric">${metric(day.tokens)}</td></tr>`).join('')}</tbody></table>` : '<p class="empty">No daily history has been reported.</p>'}</section>`;
 }
 function connections() {
   settingsDraft ??= structuredClone(state.settings);
@@ -424,7 +424,11 @@ function bindActions() {
       .then(result => navigator.clipboard.writeText(result.csv).then(() => { button.textContent = result.truncated ? 'Copied first 20,000' : 'Copied'; }))
       .catch(() => { button.textContent = 'Copy failed'; });
   });
-  on('change', '#history-provider', control => { historyProvider = (control as HTMLSelectElement).value as typeof historyProvider; render(); });
+  on('change', '#history-provider', control => {
+    const next = (control as HTMLSelectElement).value;
+    if (next === 'codex' || next === 'claude' || next === 'antigravity' || next === 'openrouter') historyProvider = next;
+    render();
+  });
   click('#mobile-sync', openMobileSync);
   const copy = (button: string, source: string) => click(button, target => {
     navigator.clipboard.writeText(root.querySelector<HTMLTextAreaElement>(source)!.value).then(() => { target.textContent = 'Copied'; }, () => { target.textContent = 'Copy failed'; });
