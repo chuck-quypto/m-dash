@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
-import { checkMacRequest, checkMacSigning, stageMacCandidate } from './mac-rc.mjs';
+import { buildMacCandidate, checkMacRequest, checkMacSigning, stageMacCandidate } from './mac-rc.mjs';
+import { dmgToolArgs } from './mac-dmg-hdiutil.mjs';
 
 const sha = 'a'.repeat(40);
 const signing = {
@@ -47,6 +48,96 @@ test('Mac release requires the public repository, attestations and every signing
   assert.equal(checkMacRequest(root, request), '1.0.0-rc.1');
   put('src-tauri/tauri.conf.json', { version: '1.0.0-rc.2' });
   assert.throws(() => checkMacRequest(root, request), /version mismatch/);
+});
+
+test('a dropped ticket connection retries stapling the same app before validation', t => {
+  const { root, put } = fixture(t);
+  const calls = [];
+  const bundle = 'target cache/aarch64-apple-darwin/release/bundle';
+  const app = join(root, bundle, 'macos/m-dash.app');
+  const env = { ...signed, PATH: 'fixture', CARGO_TARGET_DIR: join(root, 'target cache') };
+  const run = (command, args, options) => {
+    calls.push([command, ...args]);
+    if (args.includes('build')) {
+      assert.equal(options.env.APPLE_API_KEY, signed.APPLE_API_KEY);
+      put(`${bundle}/macos/m-dash.app/binary`, 'first signed app');
+    }
+    if (calls.length === 2) throw Object.assign(new Error('stapler failed'), {
+      stdout: 'NSURLErrorDomain Code=-1005 "The network connection was lost."',
+    });
+    if (args[1] === 'staple') writeFileSync(join(app, 'ticket'), 'valid');
+    if (args.includes('bundle')) {
+      // Tauri regenerates the app, creates the image, then removes the regenerated app.
+      put(`${bundle}/macos/m-dash.app/binary`, 'regenerated app');
+      assert.equal(options.env.APPLE_API_KEY, undefined);
+      assert.equal(options.env.APPLE_SIGNING_IDENTITY, signed.APPLE_SIGNING_IDENTITY);
+      assert(existsSync(join(options.env.PATH.split(delimiter)[0], 'hdiutil')));
+      const create = ['create', '-quiet', '-srcfolder', app, '-format', 'UDRW', 'fixture.dmg'];
+      const source = options.env.MDASH_STAPLED_APP;
+      assert.deepEqual(dmgToolArgs(create, options.env.MDASH_REBUILT_APP, source), ['create', '-quiet', '-srcfolder', source, '-format', 'UDRW', 'fixture.dmg']);
+      assert.equal(readFileSync(join(source, 'binary'), 'utf8'), 'first signed app');
+      assert.equal(readFileSync(join(source, 'ticket'), 'utf8'), 'valid');
+      rmSync(app, { recursive: true });
+    }
+  };
+  buildMacCandidate(root, { env, run, pause: seconds => calls.push(['sleep', seconds]) });
+  assert.deepEqual(calls, [
+    ['npm', 'run', 'tauri', '--', 'build', '--config', 'src-tauri/tauri.macos.conf.json',
+      '--target', 'aarch64-apple-darwin', '--bundles', 'app', '--ci', '--', '--locked'],
+    ['xcrun', 'stapler', 'staple', app],
+    ['sleep', 15],
+    ['xcrun', 'stapler', 'staple', app],
+    ['xcrun', 'stapler', 'validate', app],
+    ['npm', 'run', 'tauri', '--', 'bundle', '--config', 'src-tauri/tauri.macos.conf.json',
+      '--target', 'aarch64-apple-darwin', '--bundles', 'dmg', '--ci'],
+  ]);
+  assert.equal(readFileSync(join(app, 'binary'), 'utf8'), 'first signed app');
+  assert.equal(readFileSync(join(app, 'ticket'), 'utf8'), 'valid');
+});
+
+test('an invalid app ticket fails validation immediately with the Apple diagnostic', t => {
+  const { root } = fixture(t);
+  const calls = [];
+  const run = (command, args) => {
+    calls.push(args[1]);
+    if (args[1] === 'validate') throw Object.assign(new Error('stapler exited 65'), {
+      stderr: 'm-dash.app does not have a ticket stapled to it.',
+    });
+  };
+  assert.throws(() => buildMacCandidate(root, { env: {}, run, pause: () => assert.fail('invalid ticket retried') }),
+    /stapler validate failed for [^\n]*m-dash\.app:\nm-dash\.app does not have a ticket stapled to it/);
+  assert.deepEqual(calls, ['tauri', 'staple', 'validate']);
+});
+
+test('persistent connection loss during validation stops after four attempts', t => {
+  const { root } = fixture(t);
+  const pauses = [];
+  let validations = 0;
+  const run = (command, args) => {
+    if (args[1] === 'validate') {
+      validations++;
+      throw Object.assign(new Error('stapler exited 68'), { stderr: 'NSURLErrorDomain Code=-1005' });
+    }
+  };
+  assert.throws(() => buildMacCandidate(root, { env: {}, run, pause: seconds => pauses.push(seconds) }),
+    /stapler validate failed for [^\n]*m-dash\.app:\nNSURLErrorDomain Code=-1005/);
+  assert.equal(validations, 4);
+  assert.deepEqual(pauses, [15, 30, 45]);
+});
+
+test('an unexpected DMG source fails bundling and preserves the validated app', t => {
+  const { root, put } = fixture(t);
+  const binary = 'src-tauri/target/aarch64-apple-darwin/release/bundle/macos/m-dash.app/binary';
+  const run = (command, args, options) => {
+    if (args.includes('build')) put(binary, 'validated app');
+    if (args.includes('bundle')) {
+      put(binary, 'regenerated app');
+      dmgToolArgs(['create', '-srcfolder', root], options.env.MDASH_REBUILT_APP, options.env.MDASH_STAPLED_APP);
+    }
+  };
+  assert.throws(() => buildMacCandidate(root, { env: { PATH: 'fixture' }, run }), /Unexpected Tauri DMG source/);
+  assert.equal(readFileSync(join(root, binary), 'utf8'), 'validated app');
+  assert.deepEqual(dmgToolArgs(['detach', 'mounted volume']), ['detach', 'mounted volume']);
 });
 
 test('Mac staging binds the DMG to the app and includes only explicit materials and verified MPL sources', { skip: process.platform !== 'darwin' }, t => {
@@ -99,7 +190,7 @@ test('Mac staging binds the DMG to the app and includes only explicit materials 
 });
 
 test('Release workflow is manual, main-only and keeps signing secrets and write access in their own jobs', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   assert.match(workflow, /on:\n  workflow_dispatch:/);
   assert(!/^  (push|pull_request|schedule|release):/m.test(workflow));
   assert.match(workflow, /permissions:\n  contents: read/);
@@ -114,6 +205,7 @@ test('Release workflow is manual, main-only and keeps signing secrets and write 
   }
   assert(!/--no-sign/.test(workflow));
   assert.match(jobs.mac, /scripts\/mac-rc\.mjs check/);
+  assert.match(jobs.mac, /run: node scripts\/mac-rc\.mjs build/);
   assert.match(jobs.mac, /scripts\/mac-rc\.mjs stage/);
   assert.match(jobs.draft, /gh release create .*--draft/);
 });

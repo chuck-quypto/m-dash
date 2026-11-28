@@ -1,5 +1,6 @@
 import './style.css';
 import mark from '../../src/brand/cnd-monogram-hybrid-transparent.png';
+import { updateView } from '../../src/update-view.ts';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { Companion, pullCloudflare, type Cache } from './companion.ts';
 import { sampleSnapshot } from './sample.ts';
@@ -39,7 +40,7 @@ root.innerHTML = `<header><div class="brand"><div class="brand-mark" aria-hidden
 <footer>Read-only companion · Development preview<br>Opt-in encrypted sync · Publication on hold</footer></main>`;
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 function render(): void {
-  element('dashboard').innerHTML = renderDashboard(app.state, clock());
+  updateView(element('dashboard'), renderDashboard(app.state, clock()));
   element('connection').textContent = app.state.mode === 'sample' ? 'Sample data' : app.state.mode === 'live' ? 'Desktop pairing' : 'Not connected';
   element('preview').hidden = app.state.mode !== 'disconnected';
   element('pair-toggle').hidden = app.state.mode !== 'disconnected';

@@ -318,6 +318,63 @@ mod tests {
     }
     const WEEK: u64 = 7 * 86400;
 
+    #[test]
+    fn each_new_window_builds_its_rate_from_its_own_readings() {
+        let start = 20_000;
+        for spacing in [300, 450, 600, 900] {
+            // Consumption keeps rising across the reset, so only the reset time separates the runs.
+            let mut history = vec![quota(start - spacing, 99., start)];
+            for step in 0..5 {
+                let at = start + step * spacing;
+                let left = 90. - 2. * step as f64;
+                let snapshot = quota(at, left, start + WEEK);
+                history.push(snapshot.clone());
+                let forecast = &estimate(&snapshot, &history, at)[0];
+                assert_eq!(
+                    forecast["sampleCount"],
+                    step + 1,
+                    "spacing={spacing}, step={step}"
+                );
+                if step < 2 || at - start < 900 {
+                    assert!(forecast["perHour"].is_null());
+                    assert!(forecast["exhaustsAt"].is_null());
+                } else {
+                    assert_eq!(forecast["perHour"], 7200. / spacing as f64);
+                    assert_eq!(
+                        forecast["exhaustsAt"],
+                        at as f64 + left * spacing as f64 / 2.
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stale_future_and_expired_readings_suppress_both_rates_and_alerts() {
+        let latest = 10_000;
+        for (now, reset, fresh) in [
+            (latest - 1, 20_000, false),
+            (latest + 360, 20_000, true),
+            (latest + 361, 20_000, false),
+            (latest, latest + 1, true),
+            (latest, latest, false),
+        ] {
+            let history = [
+                quota(latest - 900, 8., reset),
+                quota(latest - 450, 6., reset),
+                quota(latest, 4., reset),
+            ];
+            let forecast = &estimate(&history[2], &history, now)[0];
+            assert_eq!(
+                forecast["perHour"].as_f64(),
+                fresh.then_some(16.),
+                "now={now}, reset={reset}"
+            );
+            assert_eq!(forecast["alert"].as_str(), fresh.then_some("critical"));
+            assert_eq!(forecast["exhaustsAt"].as_f64(), fresh.then_some(10_900.));
+        }
+    }
+
     // A weekly window opened at 0 and resetting at WEEK, read at `at` with `left` percent remaining.
     fn alert_at(at: u64, left: f64, history: &[(u64, f64)]) -> Value {
         let mut observations: Vec<Value> =
@@ -448,6 +505,28 @@ mod tests {
     fn credit(at: u64, purchased: f64, used: f64) -> Value {
         json!({"provider":"openrouter","observedAt":at,"totalCreditsUsd":purchased,"totalUsageUsd":used,"balanceUsd":purchased-used})
     }
+
+    #[test]
+    fn dollar_exhaustion_stops_at_zero_balance_and_at_the_one_year_horizon() {
+        let year = 366. * 86_400.;
+        for (balance, eta) in [
+            (-1., Some(2800.)),
+            (0., Some(2800.)),
+            (year / 900., Some(2800. + year)),
+            (year / 900. + 1., None),
+        ] {
+            let purchased = balance + 2.;
+            let history = [
+                credit(1000, purchased, 0.),
+                credit(1900, purchased, 1.),
+                credit(2800, purchased, 2.),
+            ];
+            let forecast = &estimate(&history[2], &history, 2800)[0];
+            assert_eq!(forecast["perHour"], 4.);
+            assert_eq!(forecast["exhaustsAt"].as_f64(), eta, "balance={balance}");
+        }
+    }
+
     #[test]
     fn dollar_rate_restarts_after_topups_corrections_and_zero_use_has_no_eta() {
         let observations = vec![

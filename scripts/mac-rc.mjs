@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { delimiter, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkRequest } from './windows-rc.mjs';
 
 const target = 'aarch64-apple-darwin';
+const bundleDirectory = (root, env) => resolve(root, env.CARGO_TARGET_DIR || 'src-tauri/target', target, 'release/bundle');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const files = directory => readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile())
   .map(entry => relative(directory, join(entry.parentPath, entry.name))).sort();
@@ -26,32 +27,57 @@ export function checkMacSigning(env) {
   assert(existsSync(env.APPLE_API_KEY_PATH), 'App Store Connect API key file is missing');
 }
 
-// Gatekeeper must accept the signed, notarized app, and the DMG must carry its own stapled ticket.
-// stapler looks tickets up in Apple's CloudKit, which sometimes drops the connection, so it gets a few tries.
-export function verifyNotarized(app, dmg, { attempts = 4, pause = seconds => execFileSync('sleep', [String(seconds)]) } = {}) {
-  const run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: 'pipe' });
-  const validate = path => {
-    for (let attempt = 1; ; attempt++) {
-      try { return run('xcrun', ['stapler', 'validate', path]); }
-      catch (error) {
-        const output = `${error.stdout ?? ''}${error.stderr ?? ''}`.trim();
-        if (attempt >= attempts) throw new Error(`stapler validate failed for ${path}:\n${output}`);
-        console.warn(`stapler validate attempt ${attempt} failed; retrying.\n${output}`);
-        pause(attempt * 15);
-      }
+function runStapler(action, path, { run = execFileSync, attempts = 4, pause = seconds => execFileSync('sleep', [String(seconds)]) } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try { return run('xcrun', ['stapler', action, path], { encoding: 'utf8', stdio: 'pipe' }); }
+    catch (error) {
+      const output = `${error.stdout ?? ''}\n${error.stderr ?? ''}`.trim() || error.message;
+      const transient = /NSURLErrorDomain[^\n]*-(?:1001|1003|1004|1005|1006|1009)\b|network connection was lost|connection reset by peer|connection timed out/i.test(output);
+      if (!transient || attempt >= attempts) throw new Error(`stapler ${action} failed for ${path}:\n${output}`, { cause: error });
+      console.warn(`stapler ${action} attempt ${attempt} failed; retrying.\n${output}`);
+      pause(attempt * 15);
     }
-  };
-  run('codesign', ['--verify', '--deep', '--strict', app]);
-  run('spctl', ['--assess', '--type', 'execute', app]);
-  validate(app);
-  run('codesign', ['--verify', dmg]);
-  run('spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', dmg]);
-  validate(dmg);
+  }
+}
+
+export function buildMacCandidate(root, { env = process.env, run = execFileSync, pause } = {}) {
+  const config = ['--config', 'src-tauri/tauri.macos.conf.json', '--target', target];
+  const tauri = (args, commandEnv) => run('npm', ['run', 'tauri', '--', ...args], { cwd: root, env: commandEnv, stdio: 'inherit' });
+  tauri(['build', ...config, '--bundles', 'app', '--ci', '--', '--locked'], env);
+  const bundle = bundleDirectory(root, env);
+  const app = join(bundle, 'macos/m-dash.app');
+  runStapler('staple', app, { run, pause });
+  runStapler('validate', app, { run, pause });
+
+  // DMG-only bundling rebuilds and deletes macos/m-dash.app. Keep the validated original for the image and staging.
+  const scratch = mkdtempSync(join(bundle, 'stapled-'));
+  const stapledApp = join(scratch, 'm-dash.app');
+  writeFileSync(join(scratch, 'hdiutil'), readFileSync(new URL('./mac-dmg-hdiutil.mjs', import.meta.url)), { mode: 0o700 });
+  renameSync(app, stapledApp);
+  try {
+    const dmgEnv = { ...env, PATH: scratch + delimiter + env.PATH, MDASH_REBUILT_APP: app, MDASH_STAPLED_APP: stapledApp };
+    delete dmgEnv.APPLE_API_KEY; // The disposable app needs no second notarization submission.
+    tauri(['bundle', ...config, '--bundles', 'dmg', '--ci'], dmgEnv);
+  } finally {
+    if (existsSync(app)) renameSync(app, join(scratch, 'rebuilt.app'));
+    renameSync(stapledApp, app);
+    rmSync(scratch, { recursive: true });
+  }
+}
+
+// Gatekeeper must accept the signed, notarized app, and the DMG must carry its own stapled ticket.
+export function verifyNotarized(app, dmg, options) {
+  execFileSync('codesign', ['--verify', '--deep', '--strict', app]);
+  execFileSync('spctl', ['--assess', '--type', 'execute', app]);
+  runStapler('validate', app, options);
+  execFileSync('codesign', ['--verify', dmg]);
+  execFileSync('spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', dmg]);
+  runStapler('validate', dmg, options);
 }
 
 export function stageMacCandidate(root, env, { verify = verifyNotarized } = {}) {
   const version = checkMacRequest(root, env);
-  const bundle = join(root, 'src-tauri/target', target, 'release/bundle');
+  const bundle = bundleDirectory(root, env);
   const app = join(bundle, 'macos/m-dash.app');
   let architectures;
   try { architectures = execFileSync('lipo', ['-archs', join(app, 'Contents/MacOS/m-dash')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
@@ -119,8 +145,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     checkMacRequest(root, process.env);
     checkMacSigning(process.env);
     execFileSync(process.execPath, ['scripts/windows-rc.mjs', 'check'], { cwd: root, stdio: 'inherit' });
+  } else if (process.argv[2] === 'build') {
+    buildMacCandidate(root);
   } else {
-    assert.equal(process.argv[2], 'stage', 'Use check or stage');
+    assert.equal(process.argv[2], 'stage', 'Use check, build or stage');
     console.log(stageMacCandidate(root, process.env));
   }
 }

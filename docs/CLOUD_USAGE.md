@@ -176,8 +176,10 @@ people only have the **Default** environment.
    shown under the prompt box, next to the repository picker. Then click the gear
    next to the environment. (In a Claude project, the same editor is in the
    project settings, under the cloud environment menu.)
-2. In **Setup script**, paste the script from **Copy setup script**. If the
-   environment already has a setup script, add this one at the end.
+2. In **Setup script**, paste the script from **Copy setup script**. Replace
+   any previous m-dash block and keep your other setup commands. If an older
+   m-dash configuration put the relay URL in **Environment variables**, remove
+   that direct relay endpoint so sessions use the installed forwarder.
 3. Under **Network access**, if the level is *Limited* (*Trusted* in older
    versions), add your relay's host to **Allowed domains**, for example
    `m-dash-relay-dev.your-subdomain.workers.dev`, without `https://` or a path.
@@ -188,12 +190,12 @@ people only have the **Default** environment.
 Only sessions started after you save are covered. Sessions that are already
 running don't change.
 
-> **Why a setup script and not environment variables?** Cloud environments
-> silently drop variables whose names start with `OTEL_`, which is how Claude
-> Code is normally told where to send usage. The script writes the same settings
-> into Claude Code's own settings file (`~/.claude/settings.json` in the session)
-> before Claude starts. Versions before 0.5.4-rc.2 gave four variables instead,
-> which never reached the session. If you added those, you can delete them.
+The setup script installs a loopback forwarder in the cloud VM. A Claude
+`SessionStart` hook starts it for each session, including sessions restored
+from a cached environment image. Claude sends logs to the forwarder. It sends
+the payload to your channel in a new request and leaves exporter credentials
+inside the VM. The setup script preserves existing authenticated exporter
+settings and reports a conflict if it finds them.
 
 ## 5. Check that it works
 
@@ -215,7 +217,7 @@ If no row appears after a refresh:
 | --- | --- |
 | **Last exchange:** with an error, in the Settings panel | The relay or this computer's network. The message names the problem. |
 | No error, no Cloud session row | The setup script is saved in the environment the session used; the session started after you saved; the relay host is in **Allowed domains**. |
-| You only added the four `OTEL_…` variables | They don't work. Use the setup script (part 4). |
+| You configured the relay using environment variables | Remove the direct relay endpoint and install the setup script from part 4. |
 | Rows from your other computers are missing | That computer joined with the code (part 3) and m-dash is running on it. |
 
 ## Other hosts
@@ -229,8 +231,8 @@ localhost. Port `relay/worker.mjs`, keeping this contract:
 | Request | Auth | Does |
 | --- | --- | --- |
 | `POST /v1/usage` with `{"id","ingestHash","readHash"}` | `Bearer` enrollment secret | Creates a channel (201, or 409 if it exists). Hashes are unpadded base64url SHA-256 of the 43-character tokens. |
-| `POST /v1/usage/{id}/rows` with `{"rows":[…]}` | `Bearer` ingest token | Stores up to 200 rows, ignoring duplicates of the same account and key. |
-| `GET /v1/usage/{id}/rows/{after}` | `Bearer` read token | Returns `{"rows":[{"seq",…}]}`: up to 200 rows after `seq`, in order. |
+| `POST /v1/usage/{id}/rows` with `{"rows":[…]}` | `Bearer` ingest token | Accepts up to 200 rows in a JSON body of at most 100,000 UTF-8 bytes. Duplicate account/key pairs succeed. If the new rows would exceed 200,000 rows in the channel, the whole batch fails with 409. |
+| `GET /v1/usage/{id}/rows/{after}` | `Bearer` read token | Returns `{"rows":[{"seq",…}]}` in ascending `seq` order, up to 200 rows and 100,000 UTF-8 bytes including the JSON envelope. Continue from the last returned `seq` until `{"rows":[]}`. |
 | `DELETE /v1/usage/{id}` | `Bearer` read token | Deletes the channel and its rows. |
 | `POST /v1/usage/{id}/{ingest token}/logs` | Token in the path | Accepts OTLP JSON logs from Claude Code and keeps only `api_request` accounting fields. |
 

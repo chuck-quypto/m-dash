@@ -100,7 +100,11 @@ function dayBars(provider: LedgerProvider, window: LedgerWindow, marks: LedgerMa
   const marked = new Map<string, string[]>();
   for (const mark of marks) marked.set(markDate(mark), [...(marked.get(markDate(mark)) ?? []), mark.text]);
   const max = Math.max(...days.map(day => day.points), 1);
-  return `<div class="chart ledger-chart" role="img" aria-label="${escape(window.label)}: allowance points per day, explained and unattributed. Exact values are in the copied CSV.">${days.map(day => `<div class="bar-cell${marked.has(day.date) ? ' marked' : ''}" role="button" tabindex="0" data-usage-provider="${provider}" data-usage-day="${escape(day.date)}" title="Open this day in the usage log. "${escape(day.date)}: ${number.format(day.points)} points, ${number.format(day.explained)} explained, ${number.format(day.unattributed)} unattributed${marked.has(day.date) ? ` · ${escape(marked.get(day.date)!.join(' · '))}` : ''}"><div class="ledger-stack" style="height:${Math.max(2, day.points / max * 100)}%"><div class="ledger-unattributed" style="flex:${day.unattributed}"></div><div class="ledger-explained" style="flex:${day.explained}"></div></div></div>`).join('')}</div>
+  return `<div class="chart ledger-chart" role="group" aria-label="${escape(window.label)} daily allowance points">${days.map(day => {
+    const notes = marked.get(day.date);
+    const label = escape(`${day.date}: ${number.format(day.points)} points, ${number.format(day.explained)} explained, ${number.format(day.unattributed)} unattributed${notes ? ` · ${notes.join(' · ')}` : ''}. Open in usage log.`);
+    return `<button type="button" class="bar-cell${notes ? ' marked' : ''}" data-usage-provider="${provider}" data-usage-day="${escape(day.date)}" aria-label="${label}" title="${label}"><span class="ledger-stack" aria-hidden="true" style="height:${Math.max(2, day.points / max * 100)}%"><span class="ledger-unattributed" style="flex:${day.unattributed}"></span><span class="ledger-explained" style="flex:${day.explained}"></span></span></button>`;
+  }).join('')}</div>
     <div class="chart-axis"><span>${escape(days[0]?.date ?? '')}</span><span>${escape(days.at(-1)?.date ?? '')}</span></div>`;
 }
 
@@ -183,7 +187,7 @@ function notes(provider: LedgerProvider, ledger: Ledger) {
   const today = new Date().toISOString().slice(0, 10);
   const rows = marks.length ? `<ul class="ledger-marks">${[...marks].reverse().map(mark => `<li><span class="ledger-mark-date">${escape(markDate(mark))}</span> ${escape(mark.text)}${mark.kind === 'plan' ? ' <span class="support">· plan change</span>' : ''}${mark.source === 'manual' ? ` <button class="text-button" data-ledger-remove="${provider}" data-at="${mark.at}" data-kind="${mark.kind}">Remove</button>` : ''}</li>`).join('')}</ul>` : '<p class="empty">No plan changes or notes in this range.</p>';
   return `<h3>Plan changes and notes</h3><p class="support">m-dash records plan changes it can see. Add ones it can't, such as moving between price tiers that report the same plan name, so rates before and after are learned separately. Notes only label the chart. Dates are UTC days, like the chart.</p>${rows}
-    <div class="ledger-mark-form"><label>Date <input type="date" id="ledger-date-${provider}" max="${today}" value="${today}"></label><label class="grow">Note <input type="text" id="ledger-text-${provider}" maxlength="200" placeholder="Moved to the $100 plan"></label><label class="check"><input type="checkbox" id="ledger-plan-${provider}"> Plan change</label><button class="text-button" data-ledger-add="${provider}">Add</button></div>`;
+    <div class="ledger-mark-form" id="ledger-mark-${provider}-${escape(ledger.account)}"><label>Date <input type="date" id="ledger-date-${provider}" max="${today}" value="${today}"></label><label class="grow">Note <input type="text" id="ledger-text-${provider}" maxlength="200" placeholder="Moved to the $100 plan"></label><label class="check"><input type="checkbox" id="ledger-plan-${provider}"> Plan change</label><button class="text-button" data-ledger-add="${provider}">Add</button></div>`;
 }
 
 export function ledgerCsv(ledgers: Ledgers) {
@@ -228,7 +232,7 @@ function computersPanel(computers: Computers, channel: boolean, localLogs: boole
   const rows = [`<tr><td><input type="text" id="device-name" maxlength="64" value="${escape(computers.name ?? '')}" aria-label="This computer's name"> <button class="text-button" id="device-name-save">Rename</button><br><span class="support">This computer</span></td><td>Now</td><td>${onOff(localLogs)}</td><td>${claude ? onOff(claudeFeed) : '—'}</td><td></td></tr>`,
     ...others.map(row => `<tr><td>${escape(row.name ?? 'Unnamed computer')}${row.name ? '' : '<br><span class="support">Update m-dash there to see its name</span>'}</td><td class="${stale(row) ? 'warning-text' : ''}">${ago(row.lastUsage)}</td><td>${onOff(flag(row.details, 'logs'))}</td><td>${claude ? onOff(flag(row.details, 'feed')) : '—'}</td><td class="support">${escape((row.details ?? '').split(';')[0])}</td></tr>`)];
   const cloud = claude ? `<p class="support">Claude cloud sessions: last usage ${ago(computers.cloudLastUsage)}.${computers.cloudLastUsage == null ? ' If you use them, add the setup script from Settings to each cloud environment.' : ''}</p>` : '';
-  return `<section class="panel"><h2>Computers and coverage</h2>
+  return `<section class="panel" id="ledger-computers"><h2>Computers and coverage</h2>
     ${channel ? '<p class="support">These computers share usage over your usage channel. Turn on <strong>Local session logs</strong> on each one so usage from while m-dash was closed is counted too. A computer whose last usage is more than three days old is shown in amber.</p>' : '<p class="support">Only this computer is counted. To include your other computers and Claude cloud sessions, set up <strong>Cloud sessions and other computers</strong> in Settings.</p>'}
     <table><caption class="sr-only">Computers reporting usage</caption><thead><tr><th scope="col">Computer</th><th scope="col">Last usage</th><th scope="col">Local session logs</th><th scope="col">Claude feed</th><th scope="col">Version</th></tr></thead><tbody>${rows.join('')}</tbody></table>
     ${channel ? cloud : ''}
@@ -247,7 +251,7 @@ export function consistencyPage(ledgers: Ledgers, enabled: { codex: boolean; cla
       const ledger = ledgers[provider];
       const name = ledgerProviderNames[provider];
       if (!ledger) return `<section class="panel"><h2>${name}</h2><p class="empty">The ledger appears after the next successful account read.</p></section>`;
-      return `<section class="panel ledger"><h2>${name}</h2>
+      return `<section class="panel ledger" id="ledger-${provider}"><h2>${name}</h2>
         ${ledger.windows.length ? ledger.windows.map(window => windowCard(provider, window, ledger.marks ?? [])).join('') : '<p class="empty">No allowance readings yet.</p>'}
         ${ledger.cacheReadShare != null ? `<p class="support">Cache reads were ${percent.format(ledger.cacheReadShare)} of prompt tokens. A sudden drop usually means repeated context was billed as fresh input.</p>` : ''}
         ${ledger.limitHits ? `<p class="warning-text">${ledger.limitHits} request${ledger.limitHits === 1 ? ' was' : 's were'} refused for a reached limit.</p>` : ''}

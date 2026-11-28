@@ -149,21 +149,47 @@ pub fn now() -> u64 {
         .as_secs()
 }
 
+async fn codex_limits() -> Result<(Rpc, Value, Value), String> {
+    let mut rpc = Rpc::start(find_codex()?, &["app-server"])?;
+    rpc.call("initialize", json!({"clientInfo":{"name":"m_dash","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false,"explicitGatewayOauth":true}})).await?;
+    rpc.send(json!({"method":"initialized"})).await?;
+    let identity = rpc
+        .call("account/read", json!({"refreshToken":false}))
+        .await?;
+    if identity["account"]["type"].as_str() != Some("chatgpt") {
+        return Err(
+            "Sign in to the Codex CLI with your ChatGPT subscription, then refresh m-dash.".into(),
+        );
+    }
+    let limits = rpc.call("account/rateLimits/read", json!({})).await?;
+    Ok((rpc, identity, limits))
+}
+
+pub(crate) async fn current_codex_limits() -> Result<Value, String> {
+    let (mut rpc, _, limits) = timeout(Duration::from_secs(45), codex_limits())
+        .await
+        .map_err(|_| "Could not confirm the current Codex account.")??;
+    let _ = rpc.child.kill().await;
+    Ok(limits)
+}
+
 pub async fn collect() -> Result<Value, String> {
     timeout(Duration::from_secs(45), async {
-        let mut rpc = Rpc::start(find_codex()?, &["app-server"])?;
-        rpc.call("initialize", json!({"clientInfo":{"name":"m_dash","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false,"explicitGatewayOauth":true}})).await?;
-        rpc.send(json!({"method":"initialized"})).await?;
-        let identity = rpc.call("account/read", json!({"refreshToken":false})).await?;
-        if identity["account"]["type"].as_str() != Some("chatgpt") {
-            return Err("Sign in to the Codex CLI with your ChatGPT subscription, then refresh m-dash.".into());
-        }
-        let limits = rpc.call("account/rateLimits/read", json!({})).await?;
+        let (mut rpc, identity, limits) = codex_limits().await?;
         let usage = rpc.call("account/usage/read", json!({})).await;
-        let result = crate::codex::finish_snapshot(limits, usage, identity["account"]["planType"].as_str(), now());
+        let result = crate::codex::finish_snapshot(
+            limits,
+            usage,
+            identity["account"]["planType"].as_str(),
+            now(),
+        );
         let _ = rpc.child.kill().await;
         result
-    }).await.map_err(|_| "The account refresh timed out. Your last successful values have been retained.".to_string())?
+    })
+    .await
+    .map_err(|_| {
+        "The account refresh timed out. Your last successful values have been retained.".to_string()
+    })?
 }
 
 pub async fn collect_grok() -> Result<Value, String> {

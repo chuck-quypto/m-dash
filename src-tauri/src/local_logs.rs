@@ -1,7 +1,7 @@
 //! Optional reader for the session logs that Codex and Claude Code keep on this computer.
 //! It extracts only per-request accounting fields and Codex allowance snapshots; message,
 //! tool and file content is never retained. Files are read incrementally from a saved byte
-//! offset, so a pass costs only what was appended since the last one.
+//! offset. Codex recovers its session identifier from the log when resuming.
 use crate::usage::Request;
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Seek, SeekFrom};
@@ -13,6 +13,12 @@ const BUDGET: u64 = 32 * 1024 * 1024;
 const LINE_LIMIT: usize = 4 * 1024 * 1024;
 /// Files untouched for longer than this are not back-filled.
 const HORIZON: u64 = 90 * 86_400;
+const CODEX_COUNTERS: [&str; 4] = [
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -21,6 +27,18 @@ pub enum Kind {
     AntigravityCli,
     AntigravityDesktop,
     AntigravityIde,
+}
+
+impl Kind {
+    pub(crate) fn source(self) -> &'static str {
+        match self {
+            Self::Codex => "codex_rollout",
+            Self::Claude => "claude_transcript",
+            Self::AntigravityCli => "antigravity_cli_transcript",
+            Self::AntigravityDesktop => "antigravity_desktop_transcript",
+            Self::AntigravityIde => "antigravity_ide_transcript",
+        }
+    }
 }
 
 /// Where a file was left and the running state needed to continue it.
@@ -94,57 +112,84 @@ pub fn scan(
     let mut paths = Vec::new();
     files(root, 6, now, &mut paths);
     paths.sort();
+    // Older Windows cursors kept the original spelling. Reuse them until a normalized cursor is saved.
+    #[cfg(windows)]
+    let legacy = {
+        let mut aliases = std::collections::HashMap::<_, &Cursor>::new();
+        for (path, cursor) in cursors {
+            let key = path.to_lowercase();
+            if key != *path && !cursors.contains_key(&key) {
+                let previous = aliases.entry(key).or_insert(cursor);
+                if cursor.offset > previous.offset {
+                    *previous = cursor;
+                }
+            }
+        }
+        aliases
+    };
     let mut result = Scan::default();
     let mut budget = BUDGET;
     for path in paths {
         if budget == 0 {
             break;
         }
-        let name = path.to_string_lossy().into_owned();
-        let mut cursor = cursors.get(&name).cloned().unwrap_or_default();
+        let path_text = path.to_string_lossy();
+        let name = if cfg!(windows) {
+            path_text.to_lowercase()
+        } else {
+            path_text.into_owned()
+        };
+        let saved = cursors.get(&name);
+        #[cfg(windows)]
+        let saved = saved.or_else(|| legacy.get(&name).copied());
+        let mut cursor = saved.cloned().unwrap_or_default();
         let Ok(mut file) = std::fs::File::open(&path) else {
             continue;
         };
-        let length = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-        if length < cursor.offset {
+        let Ok(metadata) = file.metadata() else {
+            continue;
+        };
+        let length = metadata.len();
+        let partial_end = cursor.state["partial_end"].as_u64();
+        if length < cursor.offset || partial_end.is_some_and(|end| length < end) {
             // Rewritten or truncated: start over; request keys keep replays from counting twice.
             cursor = Cursor::default();
-        }
-        if length == cursor.offset || file.seek(SeekFrom::Start(cursor.offset)).is_err() {
+        } else if length == cursor.offset || Some(length) == partial_end {
             continue;
         }
-        let mut reader = std::io::BufReader::new((&mut file).take(budget));
-        let mut line = Vec::new();
-        // Set while discarding an oversized line that spans more than one pass.
+        let mut session = None;
+        if kind == Kind::Codex {
+            let Ok(resumed) = resume_codex_session(&mut file, &mut cursor) else {
+                continue;
+            };
+            session = resumed;
+        }
+        if file.seek(SeekFrom::Start(cursor.offset)).is_err() {
+            continue;
+        }
+        let available = budget.min(length - cursor.offset);
+        let mut reader = std::io::BufReader::new(file.take(available));
+        let mut line = Vec::with_capacity(available.min(LINE_LIMIT as u64) as usize);
+        let mut position = cursor.offset;
         let mut skipping = cursor.state["skip"] == true;
-        loop {
-            line.clear();
-            let Ok(size) = reader.read_until(b'\n', &mut line) else {
+        while let Ok(buffer) = reader.fill_buf() {
+            let Some(chunk) = buffer.split_inclusive(|&byte| byte == b'\n').next() else {
                 break;
             };
-            if size == 0 {
-                break;
+            let size = chunk.len();
+            let complete = chunk.ends_with(b"\n");
+            position += size as u64;
+            budget -= size as u64;
+            skipping |= line.len() + size > LINE_LIMIT;
+            if !skipping {
+                line.extend_from_slice(chunk);
             }
-            if line.last() != Some(&b'\n') {
-                // A short partial line is still being written and is read whole later. A long
-                // one holds content, never accounting data, so it is passed over across passes.
-                if skipping || line.len() > LINE_LIMIT {
-                    cursor.offset += size as u64;
-                    budget = budget.saturating_sub(size as u64);
-                    cursor.state["skip"] = json!(true);
-                }
-                break;
+            if complete || skipping {
+                cursor.offset = position;
             }
-            cursor.offset += size as u64;
-            budget = budget.saturating_sub(size as u64);
-            if skipping {
-                skipping = false;
-                cursor.state["skip"] = json!(false);
-                continue;
-            }
-            if line.len() <= LINE_LIMIT {
+            if !skipping && complete {
                 match kind {
-                    Kind::Codex => codex_line(&line, &mut cursor.state, &mut result),
+                    Kind::Codex => codex_line(&line, &mut cursor, &mut session, &mut result),
                     Kind::Claude => claude_line(&line, &mut result),
                     Kind::AntigravityCli => antigravity_line(&line, &path, "agy-cli", &mut result),
                     Kind::AntigravityDesktop => {
@@ -153,6 +198,22 @@ pub fn scan(
                     Kind::AntigravityIde => antigravity_line(&line, &path, "agy-ide", &mut result),
                 }
             }
+            if complete || skipping {
+                line.clear();
+            }
+            if complete {
+                skipping = false;
+            }
+            reader.consume(size);
+        }
+        if skipping != (cursor.state["skip"] == true) {
+            cursor.state["skip"] = json!(skipping);
+        }
+        // Retry a budget-split record next pass, but revisit a real EOF fragment only on growth.
+        if !line.is_empty() && position == length {
+            cursor.state["partial_end"] = json!(length);
+        } else if let Some(state) = cursor.state.as_object_mut() {
+            state.remove("partial_end");
         }
         result.cursors.push((name, cursor));
     }
@@ -187,7 +248,96 @@ fn contains(line: &[u8], needle: &[u8]) -> bool {
     line.windows(needle.len()).any(|window| window == needle)
 }
 
-fn codex_line(line: &[u8], state: &mut Value, result: &mut Scan) {
+fn codex_totals(total: &Value) -> [i64; 4] {
+    CODEX_COUNTERS.map(|field| amount(&total[field]))
+}
+
+fn codex_total_state(totals: [i64; 4]) -> Value {
+    Value::Object(
+        CODEX_COUNTERS
+            .into_iter()
+            .zip(totals)
+            .map(|(field, total)| (field.into(), json!(total)))
+            .collect(),
+    )
+}
+
+fn codex_session_bytes(state: &Value, offset: u64) -> Option<[u64; 2]> {
+    let [start, end] = state["session_bytes"].as_array()?.as_slice() else {
+        return None;
+    };
+    let (start, end) = (start.as_u64()?, end.as_u64()?);
+    (start < end && end <= offset).then_some([start, end])
+}
+
+pub fn codex_cursor_state(state: &Value, offset: u64) -> Value {
+    let mut clean = json!({});
+    if let Some(skip) = state["skip"].as_bool() {
+        clean["skip"] = json!(skip);
+    }
+    for field in ["model", "effort"] {
+        if let Some(text) = label(&state[field]) {
+            clean[field] = json!(text);
+        }
+    }
+    if state["total"].is_object() {
+        clean["total"] = codex_total_state(codex_totals(&state["total"]));
+    }
+    // Legacy cursors have a session ID but no record of its byte location.
+    let bytes = codex_session_bytes(state, offset)
+        .or_else(|| (offset > 0 && label(&state["session"]).is_some()).then_some([0, offset]));
+    if let Some(bytes) = bytes {
+        clean["session_bytes"] = json!(bytes);
+    }
+    if let Some(end) = state["partial_end"].as_u64().filter(|end| *end > offset) {
+        clean["partial_end"] = json!(end);
+    }
+    clean
+}
+
+fn resume_codex_session(
+    file: &mut std::fs::File,
+    cursor: &mut Cursor,
+) -> std::io::Result<Option<String>> {
+    let Some([mut start, end]) = codex_session_bytes(&cursor.state, cursor.offset) else {
+        return Ok(None);
+    };
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = std::io::BufReader::new(file.take(end - start));
+    let mut line = Vec::new();
+    let mut session = None;
+    cursor.state["session_bytes"] = Value::Null;
+    loop {
+        line.clear();
+        let size = reader
+            .by_ref()
+            .take(LINE_LIMIT as u64 + 1)
+            .read_until(b'\n', &mut line)?;
+        if size == 0 {
+            break;
+        }
+        let at = start;
+        start += size as u64;
+        if !line.ends_with(b"\n") {
+            start += reader.skip_until(b'\n')? as u64;
+            continue;
+        }
+        if size > LINE_LIMIT || !contains(&line, b"session_meta") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        if let Some(id) = label(&value["payload"]["id"]).filter(|_| value["type"] == "session_meta")
+        {
+            session = Some(id);
+            cursor.state["session_bytes"] = json!([at, start]);
+        }
+    }
+    Ok(session)
+}
+
+fn codex_line(line: &[u8], cursor: &mut Cursor, session: &mut Option<String>, result: &mut Scan) {
     if !(contains(line, b"token_count")
         || contains(line, b"turn_context")
         || contains(line, b"session_meta"))
@@ -198,43 +348,35 @@ fn codex_line(line: &[u8], state: &mut Value, result: &mut Scan) {
         return;
     };
     let payload = &value["payload"];
+    let state = &mut cursor.state;
     match value["type"].as_str() {
         Some("session_meta") => {
             if let Some(id) = label(&payload["id"]) {
-                state["session"] = json!(id);
+                *session = Some(id);
+                state["session_bytes"] = json!([cursor.offset - line.len() as u64, cursor.offset]);
             }
         }
         Some("turn_context") => {
-            state["model"] = payload["model"].clone();
-            state["effort"] = payload["effort"].clone();
+            state["model"] = json!(label(&payload["model"]));
+            state["effort"] = json!(label(&payload["effort"]));
         }
         Some("event_msg") if payload["type"] == "token_count" => {
             let Some(at) = timestamp(&value["timestamp"]) else {
                 return;
             };
             let total = &payload["info"]["total_token_usage"];
-            let fields = [
-                "input_tokens",
-                "cached_input_tokens",
-                "output_tokens",
-                "reasoning_output_tokens",
-            ];
             if total.is_object() {
-                let now: Vec<i64> = fields.iter().map(|field| amount(&total[field])).collect();
-                let before: Vec<i64> = fields
-                    .iter()
-                    .map(|field| amount(&state["total"][field]))
-                    .collect();
-                let delta: Vec<i64> = now
-                    .iter()
-                    .zip(&before)
-                    .map(|(now, before)| (now - before).max(0))
-                    .collect();
+                let now = codex_totals(total);
+                let before = codex_totals(&state["total"]);
+                let delta: [i64; 4] = std::array::from_fn(|i| (now[i] - before[i]).max(0));
                 if delta.iter().any(|amount| *amount > 0) {
                     // Codex counts cached input inside input, and reasoning inside output.
                     let cached = delta[1].min(delta[0]);
-                    let session = state["session"].as_str().unwrap_or("unknown");
-                    let key = format!("codex:{session}:{}", now.iter().sum::<i64>());
+                    let session = session.as_deref().unwrap_or("unknown");
+                    let key = format!(
+                        "codex:{session}:{}",
+                        now.into_iter().map(i128::from).sum::<i128>()
+                    );
                     result.requests.push((
                         key,
                         at,
@@ -250,7 +392,7 @@ fn codex_line(line: &[u8], state: &mut Value, result: &mut Scan) {
                         },
                     ));
                 }
-                state["total"] = total.clone();
+                state["total"] = codex_total_state(now);
             }
             let limits = &payload["rate_limits"];
             let id = label(&limits["limit_id"]).unwrap_or_else(|| "codex".into());
@@ -389,11 +531,141 @@ fn antigravity_line(line: &[u8], path: &Path, surface: &str, result: &mut Scan) 
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::io::Write;
 
     fn write(path: &Path, lines: &[Value]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn claude_cursor_survives_config_dir_casing_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("ClaudeConfig").join("projects");
+        let recased = directory.path().join("CLAUDECONFIG").join("projects");
+        let file = root.join("project").join("session.jsonl");
+        let record = |request| {
+            json!({"type":"assistant","timestamp":"2026-10-30T00:00:10Z","requestId":request,
+                "message":{"model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1}}})
+        };
+        write(&file, &[record("first")]);
+        let now = crate::collector::now();
+        let first = scan(Kind::Claude, &root, &HashMap::new(), now);
+        assert_eq!(first.requests[0].0, "claude:first");
+        let (key, cursor) = &first.cursors[0];
+        // Simulate a cursor saved before case normalization.
+        let mut saved = HashMap::from([(file.to_string_lossy().into_owned(), cursor.clone())]);
+
+        write(&file, &[record("first"), record("appended")]);
+        let more = scan(Kind::Claude, &recased, &saved, now);
+        let keys: Vec<_> = more
+            .requests
+            .iter()
+            .map(|request| request.0.as_str())
+            .collect();
+        assert_eq!(keys, ["claude:appended"]);
+        assert_eq!(&more.cursors[0].0, key);
+
+        saved.extend(more.cursors);
+        let unchanged = scan(Kind::Claude, &root, &saved, now);
+        assert!(unchanged.requests.is_empty());
+        assert!(unchanged.cursors.is_empty());
+    }
+
+    #[test]
+    fn unfinished_files_consume_the_pass_budget_and_leave_room_on_the_next_pass() {
+        let directory = tempfile::tempdir().unwrap();
+        for id in 0..8 {
+            let file = std::fs::File::create(directory.path().join(format!("{id}.jsonl"))).unwrap();
+            file.set_len(LINE_LIMIT as u64).unwrap();
+        }
+        let last = directory.path().join("later.jsonl");
+        write(
+            &last,
+            &[json!({"type":"session_meta","payload":{"id":"later"}})],
+        );
+        let now = crate::collector::now();
+        let first = scan(Kind::Codex, directory.path(), &HashMap::new(), now);
+        assert_eq!(first.cursors.len(), 8);
+        assert!(first.cursors.iter().all(|(_, cursor)| cursor.offset == 0));
+        let saved = first.cursors.into_iter().collect();
+        let next = scan(Kind::Codex, directory.path(), &saved, now);
+        assert_eq!(next.cursors.len(), 1);
+        assert!(next.cursors[0].1.state["session"].is_null());
+        assert_eq!(
+            next.cursors[0].1.state["session_bytes"],
+            json!([0, next.cursors[0].1.offset])
+        );
+    }
+
+    #[test]
+    fn a_budget_split_retries_next_pass_and_an_eof_fragment_resumes_after_growth() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut file = std::fs::File::create(directory.path().join("one.jsonl")).unwrap();
+        file.set_len(BUDGET - 8).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        let record = |id| json!({"type":"session_meta","payload":{"id":id}});
+        let first_end = BUDGET - 7 + record("budget").to_string().len() as u64 + 1;
+        write!(file, "\n{}\n{}", record("budget"), record("unfinished")).unwrap();
+
+        let now = crate::collector::now();
+        let mut saved = HashMap::new();
+        let first = scan(Kind::Codex, directory.path(), &saved, now);
+        assert_eq!(first.cursors[0].1.offset, BUDGET - 7);
+        assert!(first.cursors[0].1.state["session"].is_null());
+        saved.extend(first.cursors);
+        let next = scan(Kind::Codex, directory.path(), &saved, now);
+        assert_eq!(next.cursors[0].1.offset, first_end);
+        assert_eq!(
+            next.cursors[0].1.state["session_bytes"],
+            json!([BUDGET - 7, first_end])
+        );
+        assert!(!next.cursors[0].1.state.to_string().contains("unfinished"));
+        saved.extend(next.cursors);
+        assert!(scan(Kind::Codex, directory.path(), &saved, now)
+            .cursors
+            .is_empty());
+
+        file.write_all(b"\n").unwrap();
+        let grown = scan(Kind::Codex, directory.path(), &saved, now);
+        assert_eq!(grown.cursors[0].1.offset, file.metadata().unwrap().len());
+        assert_eq!(
+            grown.cursors[0].1.state["session_bytes"],
+            json!([first_end, grown.cursors[0].1.offset])
+        );
+    }
+
+    #[test]
+    fn the_line_limit_includes_the_newline() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut file = std::fs::File::create(directory.path().join("one.jsonl")).unwrap();
+        let mut padded = Vec::new();
+        for (id, size) in [("at_limit", LINE_LIMIT), ("too_long", LINE_LIMIT + 1)] {
+            padded.clear();
+            write!(
+                padded,
+                "{}",
+                json!({"type":"session_meta","payload":{"id":id}})
+            )
+            .unwrap();
+            padded.resize(size - 1, b' ');
+            padded.push(b'\n');
+            file.write_all(&padded).unwrap();
+        }
+        let pass = scan(
+            Kind::Codex,
+            directory.path(),
+            &HashMap::new(),
+            crate::collector::now(),
+        );
+        assert!(pass.cursors[0].1.state["session"].is_null());
+        assert_eq!(
+            pass.cursors[0].1.state["session_bytes"],
+            json!([0, LINE_LIMIT])
+        );
+        assert_eq!(pass.cursors[0].1.offset, file.metadata().unwrap().len());
     }
 
     #[test]
@@ -447,6 +719,7 @@ mod tests {
         std::fs::write(&file, text).unwrap();
         let more = scan(Kind::Codex, directory.path(), &cursors, now);
         assert_eq!(more.requests.len(), 1);
+        assert_eq!(more.requests[0].0, "codex:s1:2895");
         assert_eq!(more.requests[0].2.input, 100);
         assert!(!format!("{:?}", more.requests).contains("private"));
     }

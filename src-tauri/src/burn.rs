@@ -703,6 +703,46 @@ mod tests {
     }
 
     #[test]
+    fn rollover_excludes_usage_through_the_first_reading_of_the_new_window() {
+        for (middle_used, reset_shift, points, tokens) in [
+            (49.0, 0, 5.0, 30.0),   // A one-point drop can be rounding.
+            (48.75, 0, 6.25, 20.0), // A larger drop starts a new window.
+            (52.0, -600, 5.0, 30.0),
+            (52.0, 600, 5.0, 30.0),
+            (52.0, -601, 3.0, 20.0),
+            (52.0, 601, 3.0, 20.0),
+        ] {
+            let first = reading("weekly", 100, 50.0);
+            let reset = first.resets_at.map(|at| at + reset_shift);
+            let middle = Reading {
+                resets_at: reset,
+                ..reading("weekly", 200, middle_used)
+            };
+            let last = Reading {
+                resets_at: reset,
+                ..reading("weekly", 300, 55.0)
+            };
+            let result = analyze(
+                Provider::Codex,
+                &BTreeMap::new(),
+                &[last, first, middle],
+                &[input(300, 20, 0), input(100, 40, 0), input(200, 10, 0)],
+                &BTreeMap::new(),
+                &[],
+            );
+            let day = &result["windows"][0]["days"][0];
+            assert_eq!(
+                day["points"], points,
+                "used={middle_used}, shift={reset_shift}"
+            );
+            assert_eq!(
+                day["weighted"], tokens,
+                "used={middle_used}, shift={reset_shift}"
+            );
+        }
+    }
+
+    #[test]
     fn hidden_usage_is_unattributed_and_does_not_inflate_the_baseline() {
         // Four days at 1 point per 100k tokens; day five also burns 3 points with no local usage.
         let mut readings = Vec::new();

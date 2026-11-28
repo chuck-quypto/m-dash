@@ -72,6 +72,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn reported_usage_preserves_fractional_allowance_and_floors_overage_at_zero() {
+        let identity = json!({"principalType": "user", "principalId": "fixture", "teamId": "team"});
+        for (used, remaining) in [(0.0, 100.0), (12.5, 87.5), (100.0, 0.0), (105.0, 0.0)] {
+            let snapshot = normalize(
+                identity.clone(),
+                json!({"config": {"creditUsagePercent": used}}),
+                100,
+            )
+            .unwrap();
+            assert_eq!(snapshot["remainingPercent"], remaining, "{used}");
+        }
+        for invalid in [json!(-0.1), json!("12.5")] {
+            let result = normalize(
+                identity.clone(),
+                json!({"config": {"creditUsagePercent": invalid}}),
+                100,
+            );
+            assert!(result.is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn prepaid_cents_do_not_become_subscription_allowance_and_missing_percentage_stays_unknown() {
         let snapshot = normalize(json!({"principalType":"user","principalId":"fixture","teamId":"team"}), json!({
             "subscription_tier":"SuperGrok", "config":{

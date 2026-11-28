@@ -219,6 +219,41 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn empty_named_buckets_fall_back_to_legacy_allowance_and_spending_limit() {
+        let snapshot = normalize(json!({
+            "accountId": "fixture", "rateLimitsByLimitId": {},
+            "rateLimits": {
+                "limitId": "team", "limitName": "Team", "spendControlReached": true,
+                "secondary": {"usedPercent": 105, "windowDurationMins": 0},
+                "individualLimit": {"limit": "80", "used": "20", "remainingPercent": 75, "resetsAt": 9000}
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            snapshot["windows"],
+            json!([
+                {"id": "team/secondary", "label": "Team", "usedPercent": 105.0, "remainingPercent": 0.0,
+                 "durationMins": null, "resetsAt": null, "blocked": true},
+                {"id": "team/spending", "label": "Team spending limit", "usedPercent": 25.0, "remainingPercent": 75.0,
+                 "durationMins": null, "resetsAt": 9000, "blocked": true, "limit": "80", "used": "20"}
+            ])
+        );
+    }
+
+    #[test]
+    fn invalid_usage_spending_and_credit_values_reject_the_quota_reading() {
+        for bucket in [
+            json!({"primary": {"usedPercent": -0.1}}),
+            json!({"primary": {"usedPercent": "25%"}}),
+            json!({"individualLimit": {"limit": "80", "used": "20", "remainingPercent": 101, "resetsAt": 9000}}),
+            json!({"credits": {"balance": "NaN", "unlimited": false}}),
+        ] {
+            let result = normalize(json!({"accountId": "fixture", "rateLimits": bucket}));
+            assert!(result.is_err(), "{bucket}");
+        }
+    }
+
+    #[test]
     fn provider_days_remain_account_totals_not_summed_local_usage() {
         let snapshot = finish_snapshot(json!({"accountId":"fixture","rateLimits":{}}), Ok(json!({
             "summary":{"lifetimeTokens":9000,"peakDailyTokens":5000},

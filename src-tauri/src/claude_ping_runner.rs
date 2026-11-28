@@ -143,7 +143,7 @@ impl Prepared {
     }
 }
 
-async fn bounded_output(child: &mut Child, seconds: u64) -> Result<Vec<u8>, String> {
+pub(crate) async fn bounded_output(child: &mut Child, seconds: u64) -> Result<Vec<u8>, String> {
     let result = tokio::time::timeout(Duration::from_secs(seconds), async {
         let output = child.stdout.take().ok_or("Claude returned no output stream.")?;
         let mut bytes = Vec::new();

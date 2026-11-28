@@ -13,6 +13,8 @@ pub mod credentials;
 pub mod dashboard;
 pub mod forecast;
 pub mod grok;
+#[cfg(test)]
+mod local_log_tests;
 pub mod local_logs;
 #[cfg(target_os = "macos")]
 mod macos_lifecycle;
@@ -24,6 +26,7 @@ pub mod usage;
 pub mod usage_relay;
 
 use dashboard::{Dashboard, Schedule};
+use local_logs::Kind;
 use settings::{Provider, Providers, Settings};
 use std::{
     path::PathBuf,
@@ -53,6 +56,7 @@ struct Inner {
     directory: PathBuf,
     claude_receiver_ready: bool,
     settings_generation: u64,
+    log_scan_generation: u64,
     ping: claude_ping::State,
     ping_generation: u64,
     ping_running: bool,
@@ -67,6 +71,65 @@ extern "C" {
 }
 
 impl Inner {
+    fn apply_settings(&mut self, settings: Settings) {
+        let providers_changed = self.dashboard.settings.providers != settings.providers;
+        if providers_changed || self.dashboard.settings.local_logs != settings.local_logs {
+            self.log_scan_generation += 1;
+        }
+        if providers_changed {
+            self.settings_generation += 1;
+            self.codex_schedule = Schedule::default();
+            self.grok_schedule = Schedule::default();
+            self.antigravity_schedule = Schedule::default();
+            // Keep Claude's five-minute minimum and OpenRouter's server retry delay.
+        }
+        self.dashboard.settings = settings;
+        self.dashboard.needs_setup = false;
+        self.update_next_refresh();
+    }
+
+    fn local_log_account<'a>(
+        &self,
+        kind: Kind,
+        generation: u64,
+        confirmed: Option<&'a str>,
+    ) -> Option<&'a str> {
+        let settings = &self.dashboard.settings;
+        if self.log_scan_generation != generation || !settings.local_logs {
+            return None;
+        }
+        // Session logs name no account. The same signed-in account must still own the scan.
+        let snapshot = match kind {
+            Kind::Codex if settings.providers.codex => self.dashboard.snapshot.as_ref()?,
+            Kind::Claude if settings.providers.claude => self.dashboard.claude.as_ref()?,
+            Kind::AntigravityCli | Kind::AntigravityDesktop | Kind::AntigravityIde
+                if settings.providers.antigravity =>
+            {
+                self.dashboard.antigravity.as_ref()?
+            }
+            Kind::Codex
+            | Kind::Claude
+            | Kind::AntigravityCli
+            | Kind::AntigravityDesktop
+            | Kind::AntigravityIde => return None,
+        };
+        confirmed.filter(|account| snapshot["accountId"].as_str() == Some(*account))
+    }
+
+    fn finish_log_scan(
+        &mut self,
+        kind: Kind,
+        account: &str,
+        generation: u64,
+        confirmed: Option<&str>,
+        scan: local_logs::Scan,
+    ) -> Result<(), String> {
+        if self.local_log_account(kind, generation, confirmed) == Some(account) {
+            self.store.ingest_local_logs(kind.source(), account, scan)?;
+        }
+        Ok(())
+    }
+
     fn update_next_refresh(&mut self) {
         self.dashboard.next_refresh = [
             (
@@ -581,17 +644,7 @@ fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<Dashboard,
         inner.dashboard.claude_ping = inner.ping.status();
     }
     inner.store.save_settings(&settings)?;
-    if inner.dashboard.settings.providers != settings.providers {
-        // Ignore reads started under old choices, including disable/re-enable races.
-        inner.settings_generation += 1;
-        inner.codex_schedule = Schedule::default();
-        inner.grok_schedule = Schedule::default();
-        inner.antigravity_schedule = Schedule::default();
-        // Keep Claude's five-minute minimum and OpenRouter's server retry delay.
-    }
-    inner.dashboard.settings = settings;
-    inner.dashboard.needs_setup = false;
-    inner.update_next_refresh();
+    inner.apply_settings(settings);
     update_forecasts(&mut inner);
     publish_dashboard(&app, &inner.dashboard);
     Ok(inner.dashboard.clone())
@@ -764,6 +817,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         read_antigravity,
         openrouter_generation,
         settings_generation,
+        log_scan_generation,
     ) = {
         let mut inner = state
             .0
@@ -809,6 +863,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             read_antigravity,
             inner.openrouter_generation,
             inner.settings_generation,
+            inner.log_scan_generation,
         )
     };
     let grok_task = read_grok.then(|| tauri::async_runtime::spawn(collector::collect_grok()));
@@ -820,6 +875,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
     let visible = app.get_webview_window("main").is_some_and(|window| {
         window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true)
     });
+    let mut codex_log_account = None;
     if read_codex {
         let mut result = collector::collect().await;
         let mut inner = state
@@ -827,6 +883,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             .lock()
             .map_err(|_| "The collector state is unavailable.")?;
         if inner.settings_generation == settings_generation {
+            codex_log_account = refreshed_account(&result);
             let storage_error = result.as_mut().ok().and_then(|snapshot| {
                 inner
                     .store
@@ -924,12 +981,12 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             publish_dashboard(&app, &inner.dashboard);
         }
     }
-    let mut ping_snapshot = None;
+    let mut claude_reading = None;
     if let Some(task) = claude_task {
         let result = task.await.unwrap_or_else(|_| {
             Err("Claude's account usage reader stopped. Saved values were retained.".into())
         });
-        ping_snapshot = result.as_ref().ok().cloned();
+        claude_reading = result.as_ref().ok().cloned();
         {
             let mut inner = state
                 .0
@@ -956,10 +1013,12 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             }
         }
     }
+    let mut antigravity_reading = None;
     if let Some(task) = antigravity_task {
         let mut result = task.await.unwrap_or_else(|_| {
             Err("The Antigravity collector stopped unexpectedly. Refresh to retry.".into())
         });
+        antigravity_reading = result.as_ref().ok().cloned();
         let mut inner = state
             .0
             .lock()
@@ -974,7 +1033,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             });
             inner
                 .antigravity_schedule
-                .finish(collector::now(), result.is_err(), false);
+                .finish(collector::now(), result.is_err(), visible);
             inner.antigravity_schedule.next =
                 inner.antigravity_schedule.next.max(collector::now() + 300);
             inner.dashboard.apply_antigravity_result(result);
@@ -986,7 +1045,40 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
             publish_dashboard(&app, &inner.dashboard);
         }
     }
-    read_local_logs(&app, settings_generation).await;
+    let claude_log_account = claude_reading
+        .as_ref()
+        .and_then(|snapshot| snapshot["accountId"].as_str());
+    let antigravity_log_account = antigravity_reading
+        .as_ref()
+        .and_then(|snapshot| snapshot["accountId"].as_str());
+    for (kind, account) in [
+        (Kind::Codex, codex_log_account.as_deref()),
+        (Kind::Claude, claude_log_account),
+        (Kind::AntigravityCli, antigravity_log_account),
+        (Kind::AntigravityDesktop, antigravity_log_account),
+        (Kind::AntigravityIde, antigravity_log_account),
+    ] {
+        read_local_logs(
+            &state,
+            kind,
+            log_scan_generation,
+            account,
+            || local_logs::root(kind),
+            async {
+                match kind {
+                    Kind::Codex => collector::current_codex_limits().await,
+                    Kind::Claude => match claude::current_account_id().await {
+                        Some(id) => Ok(serde_json::json!({"accountId": id})),
+                        None => Err("Could not confirm the current Claude account.".into()),
+                    },
+                    Kind::AntigravityCli | Kind::AntigravityDesktop | Kind::AntigravityIde => {
+                        antigravity::collect().await
+                    }
+                }
+            },
+        )
+        .await;
+    }
     if let Ok(mut inner) = state.0.lock() {
         if let Some(mut snapshot) = inner.dashboard.antigravity.clone() {
             if inner.store.attach_usage_history(&mut snapshot).is_ok() {
@@ -1020,17 +1112,18 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
         me,
     )
     .await;
-    let usage_channel = relay.as_ref().ok().copied();
-    let relay_error = relay.err();
     let mut inner = state
         .0
         .lock()
         .map_err(|_| "The collector state is unavailable.")?;
     inner.dashboard.refreshing = false;
-    inner.dashboard.usage_relay_error = relay_error;
-    if let Some(channel) = usage_channel {
-        inner.dashboard.usage_channel = channel;
-    }
+    inner.dashboard.usage_relay_error = match relay {
+        Ok((connected, warning)) => {
+            inner.dashboard.usage_channel = connected;
+            warning
+        }
+        Err(error) => Some(error),
+    };
     let now = collector::now();
     if now >= inner.last_prune.saturating_add(86_400) {
         let _ = inner.store.prune(now);
@@ -1041,7 +1134,7 @@ async fn refresh(app: tauri::AppHandle, force: bool) -> Result<Dashboard, String
     inner.update_next_refresh();
     publish_dashboard(&app, &inner.dashboard);
     let dashboard = inner.dashboard.clone();
-    if let Some(snapshot) = ping_snapshot.filter(|_| !inner.ping_running) {
+    if let Some(snapshot) = claude_reading.filter(|_| !inner.ping_running) {
         inner.ping_running = true;
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -1201,54 +1294,56 @@ fn set_device_name(app: tauri::AppHandle, name: String) -> Result<Dashboard, Str
     Ok(inner.dashboard.clone())
 }
 
+// Local logs carry no identity. Only this refresh can supply the account for an import.
+fn refreshed_account(result: &Result<serde_json::Value, String>) -> Option<String> {
+    result.as_ref().ok()?["accountId"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+}
+
 /// Best-effort: an unreadable log leaves its saved position and is retried on the next pass.
-async fn read_local_logs(app: &tauri::AppHandle, settings_generation: u64) {
-    use local_logs::Kind;
-    for (kind, provider) in [
-        (Kind::Codex, "codex_rollout"),
-        (Kind::Claude, "claude_transcript"),
-        (Kind::AntigravityCli, "antigravity_cli_transcript"),
-        (Kind::AntigravityDesktop, "antigravity_desktop_transcript"),
-        (Kind::AntigravityIde, "antigravity_ide_transcript"),
-    ] {
-        let state = app.state::<AppState>();
-        let Some(root) = local_logs::root(kind) else {
-            continue;
-        };
-        let prepared = (|| {
-            let inner = state.0.lock().ok()?;
-            let settings = &inner.dashboard.settings;
-            let (enabled, snapshot) = match kind {
-                Kind::Codex => (settings.providers.codex, &inner.dashboard.snapshot),
-                Kind::Claude => (settings.providers.claude, &inner.dashboard.claude),
-                Kind::AntigravityCli | Kind::AntigravityDesktop | Kind::AntigravityIde => {
-                    (settings.providers.antigravity, &inner.dashboard.antigravity)
-                }
-            };
-            if !settings.local_logs || !enabled || inner.settings_generation != settings_generation
-            {
-                return None;
-            }
-            // Logs name no account, so they are credited to the signed-in one.
-            let account = snapshot.as_ref()?["accountId"].as_str()?.to_owned();
-            Some((account, inner.store.log_cursors(provider).ok()?))
-        })();
-        let Some((account, cursors)) = prepared else {
-            continue;
-        };
-        let now = collector::now();
-        let Ok(scan) = tauri::async_runtime::spawn_blocking(move || {
-            local_logs::scan(kind, &root, &cursors, now)
+async fn read_local_logs(
+    state: &AppState,
+    kind: Kind,
+    generation: u64,
+    confirmed: Option<&str>,
+    root: impl FnOnce() -> Option<PathBuf>,
+    recheck: impl std::future::Future<Output = Result<serde_json::Value, String>>,
+) {
+    let prepared = (|| {
+        let inner = state.0.lock().ok()?;
+        let account = inner.local_log_account(kind, generation, confirmed)?;
+        Some((account, inner.store.log_cursors(kind.source()).ok()?))
+    })();
+    let Some((account, cursors)) = prepared else {
+        return;
+    };
+    let Some(root) = root() else { return };
+    let now = collector::now();
+    let Ok(scan) =
+        tauri::async_runtime::spawn_blocking(move || local_logs::scan(kind, &root, &cursors, now))
+            .await
+    else {
+        return;
+    };
+    if scan.cursors.is_empty()
+        || !state.0.lock().is_ok_and(|inner| {
+            inner
+                .local_log_account(kind, generation, confirmed)
+                .is_some()
         })
-        .await
-        else {
-            continue;
-        };
-        if let Ok(mut inner) = state.0.lock() {
-            if inner.settings_generation == settings_generation {
-                let _ = inner.store.ingest_local_logs(provider, &account, scan);
-            }
-        };
+    {
+        return;
+    }
+    // The CLI sign-in can change while the blocking file read is in progress.
+    let current = recheck.await;
+    let confirmed = current
+        .as_ref()
+        .ok()
+        .and_then(|snapshot| snapshot["accountId"].as_str());
+    if let Ok(mut inner) = state.0.lock() {
+        let _ = inner.finish_log_scan(kind, account, generation, confirmed, scan);
     }
 }
 
@@ -1341,13 +1436,14 @@ pub fn run() {
                 grok_schedule: Schedule::default(),
                 claude_schedule: Schedule::default(),
                 openrouter_schedule: Schedule::default(),
-                antigravity_schedule: Schedule::default(),
+            antigravity_schedule: Schedule::default(),
                 openrouter_setup:false,
                 openrouter_generation:0,
                 openrouter_retry_after:0,
                 directory,
                 claude_receiver_ready,
                 settings_generation: 0,
+                log_scan_generation: 0,
                 ping,
                 ping_generation: 0,
                 ping_running: false,
@@ -1490,4 +1586,257 @@ pub fn run() {
                 _ => (),
             }
         });
+}
+
+#[cfg(test)]
+mod log_consent_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_inner(store: store::Store, dashboard: Dashboard) -> Inner {
+        Inner {
+            store,
+            dashboard,
+            codex_schedule: Schedule::default(),
+            grok_schedule: Schedule::default(),
+            claude_schedule: Schedule::default(),
+            openrouter_schedule: Schedule::default(),
+            antigravity_schedule: Schedule::default(),
+            openrouter_setup: false,
+            openrouter_generation: 0,
+            openrouter_retry_after: 0,
+            directory: PathBuf::new(),
+            claude_receiver_ready: false,
+            settings_generation: 0,
+            log_scan_generation: 0,
+            ping: claude_ping::State::default(),
+            ping_generation: 0,
+            ping_running: false,
+            last_feed_forecast: 0,
+            last_prune: 0,
+        }
+    }
+
+    #[test]
+    fn revoking_consent_discards_scanned_rows_and_cursors_even_after_reenabling() {
+        let account = "codex:fixture";
+        let mut settings = Settings {
+            providers: Providers {
+                codex: true,
+                ..Default::default()
+            },
+            local_logs: true,
+            ..Default::default()
+        };
+        let mut inner = test_inner(
+            store::Store::open(std::path::Path::new(":memory:")).unwrap(),
+            Dashboard {
+                settings: settings.clone(),
+                snapshot: Some(json!({"accountId": account})),
+                ..Default::default()
+            },
+        );
+        let scan = || local_logs::Scan {
+            requests: vec![("fixture-request".into(), 100, usage::Request::default())],
+            cursors: vec![(
+                "fixture.jsonl".into(),
+                local_logs::Cursor {
+                    offset: 42,
+                    ..Default::default()
+                },
+            )],
+            ..Default::default()
+        };
+        let assert_empty = |inner: &Inner| {
+            assert_eq!(
+                inner
+                    .store
+                    .usage_list(account, &Default::default(), 100, false)
+                    .unwrap()["total"],
+                0
+            );
+            assert!(inner
+                .store
+                .log_cursors(Kind::Codex.source())
+                .unwrap()
+                .is_empty());
+        };
+        let started = inner.log_scan_generation;
+        settings.local_logs = false;
+        inner.apply_settings(settings.clone());
+        inner
+            .finish_log_scan(
+                Kind::Codex,
+                account,
+                inner.log_scan_generation,
+                Some(account),
+                scan(),
+            )
+            .unwrap();
+        assert_empty(&inner);
+        settings.local_logs = true;
+        inner.apply_settings(settings);
+        inner
+            .finish_log_scan(Kind::Codex, account, started, Some(account), scan())
+            .unwrap();
+        assert_empty(&inner);
+        inner
+            .finish_log_scan(
+                Kind::Codex,
+                account,
+                inner.log_scan_generation,
+                Some(account),
+                scan(),
+            )
+            .unwrap();
+        assert_eq!(
+            inner
+                .store
+                .usage_list(account, &Default::default(), 100, false)
+                .unwrap()["total"],
+            1
+        );
+        assert_eq!(
+            inner.store.log_cursors(Kind::Codex.source()).unwrap()["fixture.jsonl"].offset,
+            42
+        );
+    }
+
+    #[test]
+    fn restart_waits_for_claude_identity_before_consuming_pending_transcript_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("usage.sqlite");
+        let file = directory.path().join("session.jsonl");
+        let a = r#"claude:["a","org"]"#;
+        let b = r#"claude:["b","org"]"#;
+        let kind = Kind::Claude;
+        let now = 40 * 86_400;
+        let scan = |store: &store::Store| {
+            local_logs::scan(
+                kind,
+                directory.path(),
+                &store.log_cursors(kind.source()).unwrap(),
+                now,
+            )
+        };
+        let line = |id: &str| {
+            format!(
+                "{}\n",
+                json!({"timestamp":"1970-02-10T00:00:00Z",
+            "type":"assistant","requestId":id,"message":{"model":"fixture","usage":{"input_tokens":7}}})
+            )
+        };
+        let first = line("saved-a");
+        std::fs::write(&file, &first).unwrap();
+        {
+            let mut store = store::Store::open(&database).unwrap();
+            store.ingest_claude_telemetry(json!({"resourceLogs":[{"resource":{"attributes":[
+                {"key":"service.name","value":{"stringValue":"claude-code"}}]},"scopeLogs":[{"logRecords":[{"attributes":[
+                {"key":"user.account_uuid","value":{"stringValue":"a"}},{"key":"organization.id","value":{"stringValue":"org"}},
+                {"key":"session.id","value":{"stringValue":"old-session"}}]}]}]}]}), 1000).unwrap();
+            store
+                .ingest_local_logs(kind.source(), a, scan(&store))
+                .unwrap();
+            store.prune(now).unwrap();
+        }
+        std::fs::write(&file, first + &line("pending-b")).unwrap();
+        let store = store::Store::open(&database).unwrap();
+        let failed = claude::normalize_usage_cache(
+            json!({"oauthAccount":{"accountUuid":"b","organizationUuid":"org"},
+            "cachedUsageUtilization":{"accountUuid":"a"}}),
+            now,
+        );
+        assert!(failed.is_err());
+        let dashboard = Dashboard {
+            claude: store.claude_snapshot().unwrap(),
+            claude_usage_error: failed.as_ref().err().cloned(),
+            settings: Settings {
+                local_logs: true,
+                providers: Providers {
+                    claude: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let inner = test_inner(store, dashboard);
+        assert_eq!(inner.dashboard.claude.as_ref().unwrap()["accountId"], a);
+        assert_eq!(scan(&inner.store).requests[0].0, "claude:pending-b");
+        let generation = inner.log_scan_generation;
+        let state = AppState(Mutex::new(inner));
+        let rows = |account: &str| {
+            state
+                .0
+                .lock()
+                .unwrap()
+                .store
+                .usage_list(account, &Default::default(), now, false)
+                .unwrap()
+        };
+        let positions = || {
+            state
+                .0
+                .lock()
+                .unwrap()
+                .store
+                .log_cursors(kind.source())
+                .unwrap()
+        };
+        let saved_a = rows(a);
+        let saved_b = rows(b);
+        assert_eq!(saved_a["total"], 1);
+        assert_eq!(saved_b["total"], 0);
+        let cursors = positions();
+        let confirmed = failed
+            .as_ref()
+            .ok()
+            .and_then(|snapshot| snapshot["accountId"].as_str());
+        tauri::async_runtime::block_on(read_local_logs(
+            &state,
+            kind,
+            generation,
+            confirmed,
+            || panic!("An unconfirmed account must not start a transcript scan"),
+            std::future::ready(failed.clone()),
+        ));
+        assert_eq!(rows(a), saved_a);
+        assert_eq!(rows(b), saved_b);
+        assert_eq!(positions(), cursors);
+
+        let reading_b = json!({"accountId":b,"quotaObservedAt":now,"windows":[]});
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.dashboard.claude = inner
+                .store
+                .ingest_claude_usage(reading_b.clone(), now)
+                .unwrap();
+            inner.dashboard.claude_usage_error = None;
+        }
+        let scan_as_b = |recheck| {
+            tauri::async_runtime::block_on(read_local_logs(
+                &state,
+                kind,
+                generation,
+                reading_b["accountId"].as_str(),
+                || Some(directory.path().into()),
+                std::future::ready(recheck),
+            ))
+        };
+        for recheck in [failed, Ok(json!({"accountId":a}))] {
+            scan_as_b(recheck);
+            assert_eq!(rows(a), saved_a);
+            assert_eq!(rows(b), saved_b);
+            assert_eq!(positions(), cursors);
+        }
+        scan_as_b(Ok(reading_b.clone()));
+        assert_eq!(rows(a), saved_a);
+        assert_eq!(rows(b)["total"], 1);
+        let key = if cfg!(windows) {
+            file.to_string_lossy().to_lowercase()
+        } else {
+            file.to_string_lossy().into_owned()
+        };
+        assert_eq!(positions()[&key].offset, file.metadata().unwrap().len());
+    }
 }

@@ -179,6 +179,29 @@ fn daily_usage(value: Value, now: u64) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflowing_daily_token_sum_discards_partial_activity_and_preserves_balance() {
+        let activity = json!({"data": [
+            {"date": "2026-10-10", "prompt_tokens": 1, "completion_tokens": 0},
+            {"date": "2026-10-11", "prompt_tokens": i64::MAX, "completion_tokens": 0},
+            {"date": "2026-10-11", "prompt_tokens": 0, "completion_tokens": 1}
+        ]});
+        let snapshot = normalize(
+            json!({"data": {"total_credits": 10, "total_usage": 2.5}}),
+            Ok(activity),
+            "fixture",
+            1_791_806_400,
+        )
+        .unwrap();
+        assert_eq!(snapshot["dailyUsage"], json!([]));
+        assert_eq!(snapshot["balanceUsd"], 7.5);
+        assert!(snapshot["usageError"]
+            .as_str()
+            .unwrap()
+            .contains("too large"));
+    }
+
     #[test]
     fn omitted_activity_days_are_not_fabricated_as_zero() {
         let days = daily_usage(

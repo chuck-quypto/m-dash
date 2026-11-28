@@ -106,3 +106,34 @@ impl Settings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn older_preferences_preserve_compact_choices_and_keep_local_logs_off() {
+        let providers = Providers {
+            codex: true,
+            ..Default::default()
+        };
+        for (stored, expected) in [
+            (None, None),
+            (Some(json!([])), Some(vec![])),
+            (
+                Some(json!(["codexWeekly"])),
+                Some(vec![CompactWindow::CodexWeekly]),
+            ),
+        ] {
+            let mut saved = json!({"providers": providers});
+            if let Some(windows) = stored {
+                saved["compactWindows"] = windows;
+            }
+            let settings: Settings = serde_json::from_value(saved).unwrap();
+            assert_eq!(settings.providers, providers);
+            assert_eq!(settings.compact_windows, expected);
+            assert!(!settings.local_logs);
+        }
+    }
+}

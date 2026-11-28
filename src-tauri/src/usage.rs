@@ -44,3 +44,41 @@ pub fn windows(snapshot: &serde_json::Value) -> Vec<(String, f64, Option<i64>)> 
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn remaining_only_readings_match_reported_use_across_the_percentage_range() {
+        for half_points in 0..=200 {
+            let used = f64::from(half_points) / 2.;
+            let snapshot = json!({"windows":[
+                {"id":"reported","usedPercent":used,"remainingPercent":0,"resetsAt":10_000},
+                {"id":"legacy","remainingPercent":100. - used}
+            ]});
+            assert_eq!(
+                windows(&snapshot),
+                [
+                    ("reported".to_owned(), used, Some(10_000)),
+                    ("legacy".to_owned(), used, None),
+                ],
+                "used={used}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_windows_leave_valid_sibling_readings_available() {
+        let id = "w".repeat(128);
+        let snapshot = json!({"windows":[
+            {"id":"","usedPercent":20},
+            {"id":id,"remainingPercent":0,"resetsAt":"unknown"},
+            {"id":"w".repeat(129),"usedPercent":10},
+            {"id":"unknown","remainingPercent":null},
+            {"usedPercent":15}
+        ]});
+        assert_eq!(windows(&snapshot), [(id, 100., None)]);
+    }
+}
