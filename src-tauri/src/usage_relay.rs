@@ -515,7 +515,15 @@ mod tests {
         let (_, command) = script.split_once("MDASH_ENDPOINT='").unwrap();
         let (encoded, program) = command.split_once("' node <<'MDASH_SETUP'\n").unwrap();
         let program = program.strip_suffix("\nMDASH_SETUP\n").unwrap();
-        let mut node = std::process::Command::new("node");
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        let node_bin = std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(node_name))
+                    .find(|candidate| candidate.is_file())
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from(node_name));
+        let mut node = std::process::Command::new(node_bin);
         node.env_clear()
             .env("HOME", home)
             .env("MDASH_ENDPOINT", encoded);
